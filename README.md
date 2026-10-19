@@ -12,8 +12,12 @@ step with each step's model, tokens and cost, and the subagent workers. Around i
   nothing is delegated until you press it. No model routing: the session model does the work.
 - **Git** — status, stage/unstage, diff per file, a Haiku-written commit message, commit, sync.
 - **Memories** — the project's auto-memory as a graph, how it reaches the model, and a Sonnet audit
-  (relevant / stale / irrelevant).
-- **Styles** (`Aa`) — list, pick, edit and create output styles.
+  (relevant / stale / irrelevant) that first checks the paths and symbols each memory names against the
+  repo, proposes a fix for a stale one and deletes on click.
+- **Styles** (`Aa`, `y`) — the output styles, two lines each: the name (opens it to edit the description
+  and instructions line by line) with `use` on the right, the description under it. `use` writes
+  `outputStyle` in `settings.json`, read at the start of the next session; a new style starts as a copy of
+  the active one.
 - **Hooks** — Claude Code's own hooks from the settings files. Global hooks turn on/off; the project's
   (`.claude/settings.json`, `.claude/settings.local.json`) can be added, edited, deleted and turned off.
   "Off" parks the hook in a sibling `*.hooks-off.json`; a change applies from the next session.
