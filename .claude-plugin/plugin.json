@@ -1,7 +1,7 @@
 {
   "name": "agent-lens",
-  "version": "0.2.1",
-  "description": "Claude Code sidebar: plan and execution flow per model, prompt check at submit, subagent workers, git, memories, output styles and a Hooks tab for the settings hooks.",
+  "version": "0.3.0",
+  "description": "Claude Code sidebar: plan and execution flow, prompt check at submit, subagent workers, git, memories, output styles and a Hooks tab for the settings hooks.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Ionut Mladin"

@@ -88,16 +88,17 @@ test('Flow tab: the plan published through the tool renders by level', async ($,
     goal: 'New tab that shows how I think',
     clarity: 6,
     assumptions: ['in agent-lens, not in Rails'],
-    questions: [{ ask: 'Static or live?', why: 'live needs re-calls' }],
+    questions: [{ ask: 'Static or live?', why: 'live needs re-calls', options: ['static', 'live'], default: 'static' }],
     better_prompt: 'Add a Flow tab to agent-lens…',
     steps: [
-      { id: 'a', title: 'read the mod', tier: 'haiku', status: 'done' },
-      { id: 'b', title: 'read the API', tier: 'haiku', status: 'run' },
-      { id: 'c', title: 'design', tier: 'opus', after: ['a', 'b'] },
+      { id: 'a', title: 'read the mod', status: 'done' },
+      { id: 'b', title: 'read the API', status: 'run' },
+      { id: 'c', title: 'design', after: ['a', 'b'] },
+      { id: 'd', title: 'find callers', tier: 'haiku', why: 'reads only', after: ['c'] },
     ],
     savings: ['reads in parallel'],
   } as never)
-  expect(String(res.result)).toMatch(/3 steps/)
+  expect(String(res.result)).toMatch(/4 steps/)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'agent-lens', surface, ...PANE })
     await ui.press({ key: 'tab-think' })
@@ -109,7 +110,13 @@ test('Flow tab: the plan published through the tool renders by level', async ($,
     await ui.press({ key: 'fold-p-b' })
     expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ })).toBeUndefined()
     await ui.press({ key: 'fold-p-b' })
+    // The open question sits in NEEDS YOU with numbered options; the step suggestion waits for a press.
     expect(await ui.find({ type: 'Text', text: /Static or live/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'q-0-o-0' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'q-0-d' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'sgb-d' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /⤷ haiku \?/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /● done/ })).toBeDefined()
     await ui.unmount()
   }
 })

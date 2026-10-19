@@ -1,7 +1,7 @@
 import type { Plan, PlanStep } from '../types'
 
 // The tool the main model uses to publish its plan: what it understood, what it assumes,
-// the step flow (who does it, after what) and what would make the request more precise.
+// the step flow (after what, which step a subagent on another model could take) and what would make the request more precise.
 export const PLAN_TOOL = 'plan'
 export const PLAN_TOOL_ID = 'mcp__agent-lens__plan'
 
@@ -12,7 +12,7 @@ export const PLAN_SCHEMA = {
   type: 'object',
   properties: {
     goal: { type: 'string', description: 'What you understood the user wants, in one sentence, in your own words.' },
-    approach: { type: 'string', description: 'How you will act, in 1-2 sentences: what you do first, what you delegate and to which model, how you verify.' },
+    approach: { type: 'string', description: 'How you will act, in 1-2 sentences: what you do first, what you change, how you verify.' },
     clarity: { type: 'integer', minimum: 0, maximum: 10, description: 'How clear the request is: 10 = you know exactly what and where, 0 = you are guessing.' },
     assumptions: { type: 'array', items: { type: 'string' }, description: 'What you assume without having been told.' },
     questions: {
@@ -37,24 +37,25 @@ export const PLAN_SCHEMA = {
         properties: {
           id: { type: 'string' },
           title: { type: 'string' },
-          tier: { enum: [...TIERS], description: 'haiku = lookups/reads, sonnet = mechanical, opus = you (understanding, decisions, verification).' },
+          tier: { enum: [...TIERS], description: 'Only when a subagent on this model would do the step well (haiku: lookups and reads; sonnet: mechanical changes with a clear spec; opus: a parallel worker on the session model). A suggestion: you do the step yourself unless the user confirms it from the Flow tab. Omit for steps you do yourself.' },
+          why: { type: 'string', description: 'With tier: why a subagent on that model fits this step, in a few words.' },
           after: { type: 'array', items: { type: 'string' }, description: 'Ids of the steps that must finish first; steps with no shared dependencies run in parallel.' },
           status: { enum: [...STATUSES] },
         },
-        required: ['id', 'title', 'tier'],
+        required: ['id', 'title'],
       },
     },
-    savings: { type: 'array', items: { type: 'string' }, description: 'Efficiencies: what you skip, what runs in parallel, what you delegate down and why.' },
+    savings: { type: 'array', items: { type: 'string' }, description: 'Efficiencies: what you skip, what runs in parallel, what you reuse.' },
   },
   required: ['goal', 'approach', 'clarity', 'steps'],
 }
 
 export const PLAN_DESCRIPTION =
-  'Publishes to the Agent Lens sidebar (Flow tab) how you understood the request and how you split it into steps: what you assume, who does each step (haiku/sonnet/opus), what runs in parallel, what you make more efficient and what the user should clarify. Call it once at the start of every request, however short, before any other tool; call it again with the whole plan only when the plan changes or a phase ends (status per step). Write the plan fields in the language of the user\'s latest prompt.'
+  'Publishes to the Agent Lens sidebar (Flow tab) how you understood the request and how you split it into steps: what you assume, what runs in parallel, which step a subagent on another model could take (a suggestion the user confirms from the tab), what you make more efficient and what the user should clarify. Call it once at the start of every request, however short, before any other tool; call it again with the whole plan only when the plan changes or a phase ends (status per step). Write the plan fields in the language of the user\'s latest prompt.'
 
 export const ANSWERS_TAG = '[Agent Lens · answers]'
 
-export const PLAN_RULE = `At the start of every request, however short (even ones of 1-2 tool calls), before any other tool, call ${PLAN_TOOL_ID} with a mini-plan, even if you are not in plan mode: what you understood (goal) and how you act (approach), the clarity, the assumptions, the steps with model and dependencies, the efficiencies, and the questions that would make the user more specific (each with options and what you do by default, so you do not stop and wait). Call it again only when the plan changes or a phase ends; at the end mark the steps done. The user answers questions from the Flow tab: the answers arrive marked ${ANSWERS_TAG}, either after a tool result or as a new message. They override your assumptions: apply them immediately, and if they change the steps, republish the plan without the answered questions. Write the plan fields in the language of the user's latest prompt.`
+export const PLAN_RULE = `At the start of every request, however short (even ones of 1-2 tool calls), before any other tool, call ${PLAN_TOOL_ID} with a mini-plan, even if you are not in plan mode: what you understood (goal) and how you act (approach), the clarity, the assumptions, the steps with their dependencies (and, where a subagent on another model would do a step well, its tier and why: a suggestion only, do the step yourself unless the user confirms it), the efficiencies, and the questions that would make the user more specific (each with options and what you do by default, so you do not stop and wait). Call it again only when the plan changes or a phase ends; at the end mark the steps done. The user answers questions from the Flow tab: the answers arrive marked ${ANSWERS_TAG}, either after a tool result or as a new message. They override your assumptions: apply them immediately, and if they change the steps, republish the plan without the answered questions. A confirmed step suggestion arrives the same way ("step <title> → delegate to <model>"): only then start that subagent through Agent with that model. Write the plan fields in the language of the user's latest prompt.`
 
 export const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : [])
 const oneOf = <T extends string>(v: unknown, list: readonly T[], fallback: T) => (list.includes(v as T) ? (v as T) : fallback)
@@ -76,7 +77,8 @@ export const normalizePlan = (input: unknown, at: number): Plan => {
   const steps: PlanStep[] = raw.map((s, i) => ({
     id: String(s?.id ?? i + 1),
     title: String(s?.title ?? '—'),
-    tier: oneOf(s?.tier, TIERS, 'opus'),
+    tier: TIERS.includes(s?.tier as never) ? (s?.tier as PlanStep['tier']) : undefined,
+    why: typeof s?.why === 'string' ? s.why : '',
     after: strs(s?.after),
     status: oneOf(s?.status, STATUSES, 'todo'),
   }))
@@ -124,3 +126,7 @@ export const layers = (steps: readonly PlanStep[]): PlanStep[][] => {
 // so it does not depend on question order in a newer plan revision.
 export const answersMessage = (answered: readonly { ask: string; text: string }[]) =>
   answered.length ? [ANSWERS_TAG, ...answered.map(a => `- ${a.ask}\n  → ${a.text}`)].join('\n') : ''
+
+// A step suggestion confirmed from Flow travels as an answer: the question is the step, the answer the delegation.
+export const delegationAsk = (s: PlanStep) => `step ${s.title}`
+export const delegationText = (s: PlanStep) => `delegate to a ${s.tier} subagent${s.why ? ` (${s.why})` : ''}`

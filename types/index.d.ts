@@ -11,7 +11,6 @@ export type Step = {
   tokensOut: number
   cacheRead: number
   cost?: number
-  opusCost?: number
   stop: string | null
   answer: string
   uses: { tool: string; brief: string }[]
@@ -25,8 +24,6 @@ export type Worker = {
   agentId?: string
   type: string
   description: string
-  asked?: string
-  route?: string
   model: string
   parentModel: string
   isBackground: boolean
@@ -35,19 +32,8 @@ export type Worker = {
   durationMs?: number
   tokensOut?: number
   tools: number
-  words?: string[]
-  escalated?: string
   prompt?: string
   answer?: string
-}
-
-export type Validation = {
-  agentId: string
-  files: string[]
-  status: 'running' | 'ok' | 'fail' | 'stale'
-  summary: string
-  words?: string[]
-  tier?: 'opus' | 'sonnet' | 'haiku'
 }
 
 export type Tab = 'think' | 'changes' | 'memories' | 'styles' | 'hooks'
@@ -60,13 +46,12 @@ export type GitNote = { ok: boolean; text: string }
 
 export type Diff = { path: string; text: string }
 
-// cost: USD at each step's real model; opusCost: the same tokens priced on Opus.
-export type Totals = { steps: number; tokensIn: number; tokensOut: number; cacheRead: number; cost?: number; opusCost?: number }
+// cost: USD at each step's real model.
+export type Totals = { steps: number; tokensIn: number; tokensOut: number; cacheRead: number; cost?: number }
 
-// A task that failed on a cheap model (FAIL verdict or ESCALATE): its words and the tier it failed on.
-export type Miss = { words: string[]; tier: 'opus' | 'sonnet' | 'haiku'; at: number }
-
-export type PlanStep = { id: string; title: string; tier: 'haiku' | 'sonnet' | 'opus'; after: string[]; status: 'todo' | 'run' | 'done' | 'skip' }
+// A plan step. tier/why: the model's suggestion that a subagent on that model would do this step well;
+// it stays a suggestion until the person confirms it from Flow (the confirmation reaches the model as an answer).
+export type PlanStep = { id: string; title: string; tier?: 'haiku' | 'sonnet' | 'opus'; why: string; after: string[]; status: 'todo' | 'run' | 'done' | 'skip' }
 
 // The plan published by the model through the `plan` tool: how it understood the request and how it splits it.
 export type Plan = {
@@ -111,10 +96,6 @@ export type MemoryAudit = { at: number; running: boolean; note: string; verdicts
 export type Style = { file: string; name: string; description: string; keep: boolean; body: string }
 export type StyleDraft = { file: string; description: string; lines: string[]; dirty: boolean }
 
-// Turn retrospective: where cheaper delegation was possible. saving = USD estimate; wasted = cost lost on an escalation.
-export type RetroFinding = { kind: 'read' | 'edit' | 'worker' | 'escalated' | 'plan'; text: string; saving: number; wasted?: number }
-export type Retro = { turnId: string; at: number; steps: number; cost: number; cheapShare: number; saving: number; findings: RetroFinding[] }
-
 // The prompt check: Haiku's read of the prompt at submit (clarity, what is missing, questions, a rewrite).
 export type PromptCheck = { at: number; running: boolean; clarity: number; missing: string[]; questions: Plan['questions']; better: string; note: string }
 
@@ -136,12 +117,7 @@ declare module 'claude-code' {
       prompt: string
       tab: Tab
       fold: Record<string, boolean>
-      retro: Retro | null
-      routing: boolean
-      edited: string[]
-      validations: Validation[]
       totals: Totals
-      turnTier: { tier: 'opus' | 'sonnet' | 'haiku'; why: string }
       hasGraph: boolean
       graphFirst: boolean
       graphSeen: boolean
@@ -168,7 +144,6 @@ declare module 'claude-code' {
       styleFresh: string
       styleNote: string
       styleLoaded: boolean
-      misses: Miss[]
       planFirst: boolean
       planAsked: boolean
       turnAt: number

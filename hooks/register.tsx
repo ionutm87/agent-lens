@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { Engine, HookFor, Register, RenderChildren } from 'claude-code'
 
-import type { Answer, Change, Diff, GitNote, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Miss, Plan, PlanStep, PromptCheck, Repo, Retro, Step, StepView, Style, StyleDraft, Tab, Totals, Validation, Worker } from '../types'
+import type { Answer, Change, Diff, GitNote, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PromptCheck, Repo, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
 import { branchLabel, cleanMessage, clip, outcomeOf, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
-import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, layers, normalizePlan } from './plan'
+import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, delegationAsk, delegationText, layers, normalizePlan } from './plan'
 import { INDEX, memoriesView } from './memories-tab'
 import { stylesView } from './styles-tab'
 import { hooksView } from './hooks-tab'
@@ -11,11 +11,10 @@ import { checkPrompt, parseCheck, worthChecking } from './check'
 import { hasHook, hookFromDraft, mainText, offFile, parseSettings, replaceHook, rowsOf, serialize, withHook, withoutHook } from './settings-hooks'
 import type { HookRef, Settings } from './settings-hooks'
 import { activeStyle, buildStyle, parseStyle, slugName, withOutputStyle } from './styles'
-import { retroMessage, retroOf } from './retro'
 import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, refsOf, toMermaid, withBody, withoutIndexLine } from './memories'
 import type { Ref } from './memories'
-import { ESCALATE, ESCALATE_RULE, MODEL_IDS, VALIDATOR, VALIDATOR_PROMPT, addMiss, costOf, escalationOf, learned, tagged, tierOf, verdictOf, wordsOf } from './router'
-import type { Tier } from './router'
+import { costOf, tierOf } from './cost'
+import type { Tier } from './cost'
 
 const PANE = 'agent-lens'
 
@@ -26,14 +25,8 @@ const toolCounts = atom({ plugin: 'agent-lens', key: 'toolCounts' } as const, {}
 const prompt = atom({ plugin: 'agent-lens', key: 'prompt' } as const, '')
 const tab = atom({ plugin: 'agent-lens', key: 'tab' } as const, 'think' as Tab)
 // What is open/closed in Flow, by key; a missing key = the row's default state.
-const retro = atom({ plugin: 'agent-lens', key: 'retro' } as const, null as Retro | null)
 const folds = atom({ plugin: 'agent-lens', key: 'fold' } as const, {} as Record<string, boolean>)
-// Routing (delegating down, the learned tier bumps, the retrospective) is off until the person turns it on.
-const routing = atom({ plugin: 'agent-lens', key: 'routing' } as const, false)
-const edited = atom({ plugin: 'agent-lens', key: 'edited' } as const, [])
-const validations = atom({ plugin: 'agent-lens', key: 'validations' } as const, [])
 const totals = atom({ plugin: 'agent-lens', key: 'totals' } as const, { steps: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0 } as Totals)
-const turnTier = atom({ plugin: 'agent-lens', key: 'turnTier' } as const, { tier: 'opus', why: 'default' } as { tier: Tier; why: string })
 const hasGraph = atom({ plugin: 'agent-lens', key: 'hasGraph' } as const, false)
 const graphFirst = atom({ plugin: 'agent-lens', key: 'graphFirst' } as const, true)
 const graphSeen = atom({ plugin: 'agent-lens', key: 'graphSeen' } as const, false)
@@ -60,7 +53,6 @@ const styleLoaded = atom({ plugin: 'agent-lens', key: 'styleLoaded' } as const, 
 const plan = atom({ plugin: 'agent-lens', key: 'plan' } as const, null as Plan | null)
 const answers = atom({ plugin: 'agent-lens', key: 'answers' } as const, {} as Record<string, Answer>)
 const busy = atom({ plugin: 'agent-lens', key: 'busy' } as const, false)
-const misses = atom({ plugin: 'agent-lens', key: 'misses' } as const, [] as Miss[])
 const planFirst = atom({ plugin: 'agent-lens', key: 'planFirst' } as const, true)
 const planAsked = atom({ plugin: 'agent-lens', key: 'planAsked' } as const, false)
 const turnAt = atom({ plugin: 'agent-lens', key: 'turnAt' } as const, 0)
@@ -71,9 +63,6 @@ const hookDraft = atom({ plugin: 'agent-lens', key: 'hookDraft' } as const, null
 const hookNote = atom({ plugin: 'agent-lens', key: 'hookNote' } as const, '')
 const hooksLoaded = atom({ plugin: 'agent-lens', key: 'hooksLoaded' } as const, false)
 const hookPaths = atom({ plugin: 'agent-lens', key: 'hookPaths' } as const, { global: '', project: '', local: '' } as HookPaths)
-
-// A turn whose prompt starts with [haiku]/[sonnet]/[opus] runs on that model; any other stays on the session model.
-const PINNED = 'picked by you'
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 
@@ -133,16 +122,6 @@ export const pairUses = <U extends { tool: string; brief: string }, D extends U 
 
     return { ...u, output: done[i]?.output ? clip(done[i].output, 3000) : undefined, isError: done[i]?.isError }
   })
-}
-
-// Learned failures belong to the project and carry over from one session to the next.
-const missKey = async ($: Engine) => `misses:${await $.session.root()}`
-
-const recordMiss = async ($: Engine, words: string[] | undefined, tier: Tier | undefined) => {
-  if (!words?.length || !tier || tier === 'opus') return
-  const list = addMiss(await read($, misses), { words, tier, at: await $.clock.now() })
-  await update($, misses, () => list)
-  await $.store.set(await missKey($), list)
 }
 
 const usd = (n: number) => `$${n.toFixed(n < 1 ? 3 : 2)}`
@@ -315,24 +294,6 @@ const commitStaged = async ($: Engine) => {
 
     return res
   })
-}
-
-// After each main-loop turn: the execution analysis (what could have been delegated more cheaply) goes into Flow.
-// Only with routing on: off, delegation is not wanted, so neither is advice about it.
-const runRetro = async ($: Engine, turnId: string) => {
-  if (!(await read($, routing))) return
-  const all = await read($, steps)
-  const since = await read($, turnAt)
-  const turnWorkers = (await read($, workers)).filter(w => w.startedAt >= since && w.agentId)
-  const ids = new Set(turnWorkers.map(w => w.agentId))
-  const main = all.filter(s => s.turnId === turnId && !s.agentId)
-  if (!main.length) return
-  const r = retroOf(turnId, await $.clock.now(), main, turnWorkers, all.filter(s => s.agentId && ids.has(s.agentId)), await read($, plan))
-  await update($, retro, () => r)
-  if (!r.findings.length) return
-  $.ui.toast(`Retrospective: ${r.findings.length} possible optimizations${r.saving > 0 ? ` · ~${usd(r.saving)}` : ''}`)
-  // The line enters the conversation, like the validator's verdict: the model's next turn reads it.
-  await $.session.append({ message: { type: 'user', content: [{ type: 'text', text: retroMessage(r) }] } })
 }
 
 // The "Memories" tab: the current project's auto-memory as a graph, and how it reaches the model.
@@ -621,12 +582,6 @@ const trackMemory: HookFor<'tool.call'> = async ($, e, next) => {
 }
 
 // The switches the person flips are kept across sessions.
-const flipRouting = async ($: Engine) => {
-  const isOn = !(await read($, routing))
-  await update($, routing, () => isOn)
-  await $.store.set('routing', isOn)
-}
-
 const flipCheck = async ($: Engine) => {
   const isOn = !(await read($, checkOn))
   await update($, checkOn, () => isOn)
@@ -799,32 +754,19 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'lens', description: 'Open the Agent Lens sidebar' })
-    await $.agent.register({
-      name: 'validator',
-      description: 'Final Opus validation of a turn with changes (started only by Agent Lens).',
-      prompt: VALIDATOR_PROMPT,
-      tools: ['Read', 'Bash'],
-      model: 'opus',
-    })
     await $.tool.register({ name: PLAN_TOOL, description: PLAN_DESCRIPTION, inputSchema: PLAN_SCHEMA, isDeferred: false })
     void refreshChanges($)
     void loadMemories($)
     void loadStyles($)
-    const saved = await $.store.get(await missKey($))
-    await update($, misses, () => (Array.isArray(saved) ? (saved as Miss[]) : []))
-    // Routing stays off until the person turns it on; the prompt check stays on until they turn it off.
-    const prefs = [await $.store.get('routing'), await $.store.get('check')]
-    await update($, routing, () => prefs[0] === true)
-    await update($, checkOn, () => prefs[1] !== false)
+    // The prompt check stays on until the person turns it off.
+    const check = await $.store.get('check')
+    await update($, checkOn, () => check !== false)
     await update($, hasGraph, () => false)
     if (await $.fs.exists('.codegraph')) await update($, hasGraph, () => true)
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
 
     return next(e)
   })
-
-  // Only the mod starts the validator, not the main model.
-  on('agent.offer', { agent: 'agent-lens:validator' }, () => ({ isOffered: false }))
 
   on('command.run', { command: 'lens' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Agent Lens', focus: true })
@@ -836,10 +778,7 @@ export const register: Register = on => {
   // and if it was closed by hand, it comes back. On an already open id it's a no-op.
   on('prompt.submit', async ($, e, next) => {
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
-    const tag = tagged(e.text)
     const now = await $.clock.now()
-    // A [haiku]/[sonnet]/[opus] tag pins this turn's model; without one the turn runs on the session model.
-    await update($, turnTier, () => (tag.tier ? { tier: tag.tier, why: PINNED } : { tier: 'opus', why: 'default' }))
     const isHuman = !e.origin || e.origin.kind === 'composer' || e.origin.kind === 'bridge'
     if (isHuman) {
       await update($, graphSeen, () => false)
@@ -848,36 +787,21 @@ export const register: Register = on => {
       await update($, plan, () => null)
       await update($, answers, () => ({}))
       await update($, folds, () => ({}))
-      await update($, retro, () => null)
       await update($, promptCheck, () => null)
     }
     const previous = await read($, prompt)
     await update($, busy, () => true)
-    await update($, prompt, () => tag.text)
-    await update($, edited, () => [])
-    if (isHuman && (await read($, checkOn)) && worthChecking(tag.text)) void runCheck($, tag.text, previous, now)
+    await update($, prompt, () => e.text)
+    if (isHuman && (await read($, checkOn)) && worthChecking(e.text)) void runCheck($, e.text, previous, now)
 
-    return next(tag.tier ? { ...e, text: tag.text } : e)
+    return next(e)
   })
 
-  // The mod's rules go into the system prompt: downward delegation when routing is on,
-  // CodeGraph before Grep/Read when the project has an index.
+  // The mod's rules go into the system prompt: the miniplan first, CodeGraph before Grep/Read when the
+  // project has an index, the reply language. No model routing: the session model does the work.
   on('prompt.compose', async ($, e, next) => {
     const res = await next(e)
     const extra = []
-    if (await read($, routing)) {
-      extra.push({
-        id: 'agent-lens:delegate',
-        scope: 'session' as const,
-        text: `Whenever you can, delegate to a lower model through Agent with the model parameter: haiku for searches, inventories and code reading; sonnet for mechanical changes with a clear spec (renames, translations, tests following a pattern, precisely described point fixes). Keep on the current model only understanding the problem, design decisions and verifying the result. Don't delegate what you would solve in one or two tool calls. If a subagent replies "${ESCALATE} …", don't retry the task on the same model: take it over yourself or redelegate one tier up.`,
-      })
-    } else {
-      extra.push({
-        id: 'agent-lens:no-routing',
-        scope: 'session' as const,
-        text: "Model routing is off: do the work yourself, on the session model, and don't pass a model to Agent to delegate to haiku or sonnet unless the user's prompt asks for it. In the plan, mark the steps tier opus (= you).",
-      })
-    }
     if (await read($, planFirst)) extra.push({ id: 'agent-lens:plan', scope: 'session' as const, text: PLAN_RULE })
     if ((await read($, hasGraph)) && (await read($, graphFirst))) {
       extra.push({
@@ -926,18 +850,6 @@ export const register: Register = on => {
 
       return { deny: 'The project has a CodeGraph index: start with codegraph_explore (verbatim source and callers in a single call). If it does not cover what you are looking for, repeat Grep/Glob.' }
     }
-    const path = (e as { file_path?: string; notebook_path?: string }).file_path ?? (e as { notebook_path?: string }).notebook_path
-    if (EDIT_TOOLS.has(String(e.tool)) && path) {
-      const running = await read($, validations)
-      const isValidator = running.some(v => v.agentId === e.agentId)
-      if (!isValidator) await update($, edited, files => (files.includes(path) ? files : [...files, path]))
-      // A FAIL verdict on a file edited afterwards is stale, even if the turn (on Opus) doesn't revalidate.
-      if (!isValidator) {
-        await update($, validations, list =>
-          list.map(v => (v.status === 'fail' && v.files.includes(path) ? { ...v, status: 'stale' as const } : v)),
-        )
-      }
-    }
     if (e.agentId) {
       await update($, workers, list =>
         list.map(w => (w.agentId === e.agentId ? { ...w, tools: w.tools + 1 } : w)),
@@ -951,10 +863,8 @@ export const register: Register = on => {
     return text ? { ...res, context: [...(res.context ?? []), text] } : res
   })
 
-  // The main loop stays on the session model unless the prompt pinned one; subagents get their model at spawn.
+  // Every step of the main loop and of the subagents, with its model, tools, tokens and cost.
   on('turn.step', async function* ($, e, next) {
-    const pinned = await read($, turnTier)
-    if (!e.agentId && pinned.why === PINNED && e.model !== MODEL_IDS[pinned.tier]) e = { ...e, model: MODEL_IDS[pinned.tier] }
     const id = `${e.turnId}:${e.agentId ?? 'main'}:${e.index}`
     const step: Step = {
       id,
@@ -978,7 +888,6 @@ export const register: Register = on => {
 
     const usage = res.usage
     const cost = usage ? costOf(tierOf(usage.model ?? e.model) ?? 'opus', usage) : 0
-    const opusCost = usage ? costOf('opus', usage) : 0
     await update($, steps, list =>
       list.map(s =>
         s.id === id
@@ -991,7 +900,6 @@ export const register: Register = on => {
               tokensOut: usage?.output_tokens ?? 0,
               cacheRead: usage?.cache_read_input_tokens ?? 0,
               cost,
-              opusCost,
               stop: res.stopReason,
               answer: clip(res.answer, 4000),
               uses: res.toolUses.map(u => ({ tool: u.name, brief: brief(u.input) })),
@@ -1007,38 +915,26 @@ export const register: Register = on => {
         tokensOut: t.tokensOut + usage.output_tokens,
         cacheRead: t.cacheRead + usage.cache_read_input_tokens,
         cost: (t.cost ?? 0) + cost,
-        opusCost: (t.opusCost ?? 0) + opusCost,
       }))
     }
 
     return res
   })
 
+  // A subagent runs on the model the main model asked for, or inherits its parent's; the mod only watches.
   on('agent.spawn', async ($, e, next) => {
     const id = e.tool_use_id || `${e.subagentType}:${await $.clock.now()}`
-    const isRoutable = !e.fork && !e.workflow && e.subagentType !== VALIDATOR && (await read($, routing))
-    const task = `${e.description} ${e.prompt.slice(0, 200)}`
-    const asked = clip(e.prompt, 1500)
-    // Opus picks the subagent's model; without one, the subagent inherits Opus.
-    const picked = isRoutable && e.model ? { model: e.model, why: 'requested' } : undefined
-    // What already failed on this model goes up a tier, even if the main model asked for another.
-    const route = picked && (learned(task, tierOf(picked.model) ?? 'opus', await read($, misses)) ?? picked)
-    const routeTier = route && tierOf(route.model)
-    if (route) e = { ...e, model: route.model, prompt: routeTier && routeTier !== 'opus' ? e.prompt + ESCALATE_RULE : e.prompt }
     const worker: Worker = {
       id,
       type: e.subagentType,
       description: e.description,
-      asked: e.model,
-      route: route ? `${route.model}: ${route.why}` : e.subagentType === VALIDATOR ? 'opus: final validation' : undefined,
       model: e.model ?? e.parentModel,
       parentModel: e.parentModel,
       isBackground: Boolean(e.background),
       status: 'running',
       startedAt: await $.clock.now(),
       tools: 0,
-      words: wordsOf(task),
-      prompt: asked,
+      prompt: clip(e.prompt, 1500),
     }
     await update($, workers, list => [...list, worker].slice(-30))
 
@@ -1060,54 +956,16 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (!e.agentId) {
       void refreshChanges($)
-      await runRetro($, e.turnId)
       await update($, busy, () => false)
       await submitAnswers($)
     }
-    const pending = (await read($, validations)).find(v => v.agentId === e.agentId)
-    if (pending) {
-      const verdict = verdictOf(e.answer)
-      await update($, validations, list =>
-        list.map(v => (v.agentId === pending.agentId ? { ...v, status: verdict.isOk ? ('ok' as const) : ('fail' as const), summary: verdict.line } : v)),
-      )
-      $.ui.toast(`Opus validation: ${verdict.line}`)
-      if (!verdict.isOk) await recordMiss($, pending.words, pending.tier)
-      // The line enters the conversation, so the model's next turn reads it.
-      await $.session.append({
-        message: { type: 'user', content: [{ type: 'text', text: `[Agent Lens · final Opus validation on ${pending.files.join(', ')}]\n${e.answer}` }] },
-      })
-    }
-
-    const files = await read($, edited)
-    const cheaper = (await read($, turnTier)).tier !== 'opus'
-    if (!e.agentId && e.reason === 'answer' && files.length > 0 && cheaper && (await read($, routing))) {
-      await update($, edited, () => [])
-      const request = await read($, prompt)
-      const failedTier = (await read($, turnTier)).tier
-      const spawned = await $.agent.spawn({
-        subagentType: VALIDATOR,
-        description: 'Final Opus validation',
-        prompt: `User request:\n${request}\n\nModified files:\n${files.join('\n')}`,
-      })
-      if (spawned.agentId) {
-        const validation: Validation = { agentId: spawned.agentId, files, status: 'running', summary: '', words: wordsOf(request), tier: failedTier }
-        await update($, validations, list => [...list, validation].slice(-10))
-      }
-    }
 
     if (e.agentId) {
-      const escalated = escalationOf(e.answer ?? '')
-      const worker = (await read($, workers)).find(w => w.agentId === e.agentId)
-      if (escalated && worker) {
-        $.ui.toast(`${worker.type} on ${short(worker.model)} asks for a higher model: ${escalated}`)
-        await recordMiss($, worker.words, tierOf(worker.model))
-      }
       await update($, workers, list =>
         list.map(w =>
           w.agentId === e.agentId
             ? {
                 ...w,
-                escalated,
                 answer: e.answer ? clip(e.answer, 1500) : undefined,
                 status: e.isAborted ? ('aborted' as const) : ('done' as const),
                 durationMs: e.durationMs,
@@ -1123,7 +981,6 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Input, Code } = $.ui.resolve(e)
-    const isRouting = await read($, routing)
     const list = await read($, changes)
     const repoNow = await read($, repo)
     const message = await read($, commitMsg)
@@ -1136,10 +993,8 @@ export const register: Register = on => {
     const planNow = await read($, plan)
     const answered = await read($, answers)
     const isSyncing = await read($, syncing)
-    const tierNow = await read($, turnTier)
     const graphReady = await read($, hasGraph)
     const isGraphFirst = await read($, graphFirst)
-    const lastCheck = (await read($, validations)).at(-1)
     const allSteps = await read($, steps)
     const allWorkers = await read($, workers)
     const used = await read($, skillsUsed)
@@ -1149,10 +1004,9 @@ export const register: Register = on => {
     const stored = String(await read($, tab))
     const current: Tab = ['think', 'changes', 'memories', 'styles', 'hooks'].includes(stored) ? (stored as Tab) : 'think'
     const foldNow = await read($, folds)
-    const retroNow = await read($, retro)
     const sessionModel = await $.session.model()
     const sum = await read($, totals)
-    const learnedNow = await read($, misses)
+    const isBusy = await read($, busy)
     const isPlanFirst = await read($, planFirst)
     const isChecking = await read($, checkOn)
     const checkNow = await read($, promptCheck)
@@ -1169,7 +1023,6 @@ export const register: Register = on => {
     const tokensOut = turnSteps.reduce((n, s) => n + s.tokensOut, 0)
     const cacheRead = turnSteps.reduce((n, s) => n + s.cacheRead, 0)
     const turnCost = turnSteps.reduce((n, s) => n + (s.cost ?? 0), 0)
-    const saved = sum.opusCost ? Math.round((1 - (sum.cost ?? 0) / sum.opusCost) * 100) : 0
     const running = allWorkers.filter(w => w.status === 'running').length
     const workerType = (agentId: string) => allWorkers.find(w => w.agentId === agentId)?.type ?? 'worker'
 
@@ -1198,21 +1051,6 @@ export const register: Register = on => {
           {last?.effort && <Text dimColor> · effort </Text>}
           {last?.effort && <Text color={C.info}>{last.effort}</Text>}
         </Text>
-        <Box justifyContent="space-between">
-          <Text wrap="truncate-end">
-            <Text dimColor>routing </Text>
-            {isRouting ? <Text color={C.accent}>auto: delegates down</Text> : <Text dimColor>off</Text>}
-            {tierNow.why === PINNED ? (
-              <Text>
-                <Text dimColor> · this turn </Text>
-                <Text bold color={TIER_COLOR[tierNow.tier]}>{tierNow.tier}</Text>
-              </Text>
-            ) : (
-              <Text dimColor> · [haiku]/[sonnet] at the start pins a turn</Text>
-            )}
-          </Text>
-          <Button key="routing" plain label={isRouting ? '[off]' : '[on]'} hotkey="r" onPress={() => void flipRouting($)} />
-        </Box>
         {graphReady && (
           <Box justifyContent="space-between">
             <Text wrap="truncate-end">
@@ -1236,37 +1074,16 @@ export const register: Register = on => {
           </Text>
           <Button key="check" plain label={isChecking ? '[off]' : '[on]'} hotkey="k" onPress={() => void flipCheck($)} />
         </Box>
-        {lastCheck && (
-          <Text wrap="truncate-end" dimColor={lastCheck.status === 'stale'} color={lastCheck.status === 'ok' ? C.ok : lastCheck.status === 'fail' ? C.bad : lastCheck.status === 'running' ? C.run : undefined}>
-            {lastCheck.status === 'running'
-              ? '● opus validation running…'
-              : lastCheck.status === 'stale'
-                ? '↻ stale verdict: files changed afterwards'
-                : `${lastCheck.status === 'ok' ? '✓' : '✗'} ${lastCheck.summary}`}
-          </Text>
-        )}
         <Text dimColor>
           turn: {turnSteps.length} steps · {k(tokensIn)}↑ {k(tokensOut)}↓ · cache {tokensIn ? Math.round((cacheRead / tokensIn) * 100) : 0}%
         </Text>
-        {/* API list prices: on a subscription this measures savings, not the bill. */}
+        {/* API list prices: on a subscription this is a measure, not the bill. */}
         <Text wrap="truncate-end">
           <Text dimColor>turn cost </Text>
           <Text>{usd(turnCost)}</Text>
           <Text dimColor> · session </Text>
           <Text>{usd(sum.cost ?? 0)}</Text>
-          <Text dimColor> / all on opus {usd(sum.opusCost ?? 0)} </Text>
-          <Text color={saved > 0 ? C.ok : undefined}>({saved > 0 ? `−${saved}` : '0'}%)</Text>
         </Text>
-        {isRouting && learnedNow.length > 0 && (
-          <Box justifyContent="space-between">
-            <Text wrap="truncate-end">
-              <Text dimColor>learned </Text>
-              <Text color={C.run}>{learnedNow.length} failures</Text>
-              <Text dimColor> on cheap models · similar tasks go up a tier</Text>
-            </Text>
-            <Button key="forget" plain label="[forget]" onPress={async () => { await update($, misses, () => []); await $.store.delete(await missKey($)) }} />
-          </Box>
-        )}
         {/* From /usage: the account's context and 5h / 7-day limits. */}
         <Box gap={2}>
           <Text wrap="truncate-end">
@@ -1350,18 +1167,39 @@ export const register: Register = on => {
       )
     }
 
-    // The Flow tab: how the model understood the request, the plan by level (steps on the same level
-    // run in parallel: ┬ ├ └) and what was actually executed, step by step, each with its model.
-    const TIER_ICON = { haiku: '⌕', sonnet: '✎', opus: '◆' } as const
-    const TIER_JOB = { haiku: 'searches, reads, inventories', sonnet: 'mechanical changes with a clear spec', opus: 'me: understanding, decisions, verification' } as const
+    // The Flow tab: a stage line, what needs the person first, how the model understood the request, the plan
+    // by level (steps on the same level run in parallel: ┬ ├ └) and what was actually executed, step by step.
     const STATUS_MARK = { todo: ['○', undefined], run: ['●', C.run], done: ['✓', C.ok], skip: ['⊘', undefined] } as const
     const WORKER_COLOR = { running: C.run, done: C.ok, aborted: C.bad, denied: C.bad } as const
     const planLevels = planNow ? layers(planNow.steps) : []
-    const mix = planNow ? (['haiku', 'sonnet', 'opus'] as const).map(t => [t, planNow.steps.filter(s => s.tier === t).length] as const) : []
     const doneN = planNow?.steps.filter(s => s.status === 'done' || s.status === 'skip').length ?? 0
     const clarityColor = (n: number) => (n >= 8 ? C.ok : n >= 5 ? C.run : C.bad)
     const skillList = Object.entries(used).sort((a, b) => b[1] - a[1])
     const pad = '       '
+    const isOpenQ = (ask: string) => !answered[ask] || answered[ask].state === 'draft'
+    // Questions from the prompt check and the plan, the open ones first; the first open one takes the digit hotkeys.
+    const questions = [...(checkNow?.questions ?? []), ...(planNow?.questions ?? [])].filter((q, i, all) => all.findIndex(x => x.ask === q.ask) === i)
+    const openQ = questions.filter(q => isOpenQ(q.ask))
+    const suggested = planNow?.steps.filter(s => s.tier && s.status !== 'done' && s.status !== 'skip' && isOpenQ(delegationAsk(s))) ?? []
+    // Where the turn is: understanding (no plan yet), planning (plan, no tool after it), executing, done.
+    const execN = turnSteps.filter(s => !s.agentId && s.tools.some(t => t !== 'agent-lens:plan')).length
+    const phase = !isBusy && !planNow && turnSteps.length === 0 ? 'idle' : !planNow ? 'understand' : isBusy ? (execN ? 'execute' : 'plan') : 'done'
+    const PHASES = ['understand', 'plan', 'execute', 'done'] as const
+    const phaseAt = PHASES.indexOf(phase as (typeof PHASES)[number])
+
+    const phaseLine = (
+      <Text wrap="truncate-end">
+        {PHASES.map((name, i) => (
+          <Text key={`phase-${name}`}>
+            {i > 0 && <Text dimColor> ─ </Text>}
+            <Text color={i < phaseAt ? C.ok : i === phaseAt ? C.run : undefined} dimColor={i > phaseAt || phase === 'idle'} bold={i === phaseAt}>
+              {i < phaseAt ? '✓' : i === phaseAt ? '●' : '○'} {name}
+            </Text>
+          </Text>
+        ))}
+        {phase === 'idle' && <Text dimColor> · send a prompt</Text>}
+      </Text>
+    )
 
     const planStep = (s: PlanStep, level: PlanStep[], li: number, si: number) => {
       const [mark, markColor] = STATUS_MARK[s.status]
@@ -1370,37 +1208,54 @@ export const register: Register = on => {
       const open = isOpen(key, s.status === 'run')
       const deps = s.after.map(id => planNow?.steps.find(x => x.id === id)?.title ?? id)
       const peers = level.filter(x => x.id !== s.id).map(x => x.title)
-      const onTier = turnWorkers.filter(w => (tierOf(w.model) ?? 'opus') === s.tier)
+      const isSkip = s.status === 'skip'
+      const ask = delegationAsk(s)
+      const a = s.tier ? answered[ask] : undefined
+      const isConfirmed = Boolean(a && a.state !== 'draft')
+      const onTier = s.tier ? turnWorkers.filter(w => (tierOf(w.model) ?? 'opus') === s.tier) : []
+      const canDelegate = s.tier && !isSkip && s.status !== 'done' && !isConfirmed
 
       return (
         <Box key={`ps-${s.id}`} flexDirection="column">
           <Box>
             <Text dimColor>{si === 0 ? `${String(li + 1).padStart(2)} ` : '   '}{branch} </Text>
             <Button key={`fold-${key}`} plain label={open ? '▾' : '▸'} onPress={() => toggle(key, !open)} />
-            <Text wrap="truncate-end" dimColor={s.status === 'skip'}>
+            <Text wrap="truncate-end" dimColor={isSkip}>
               <Text color={markColor}> {mark} </Text>
-              <Text color={TIER_COLOR[s.tier]} bold={s.tier === 'opus'}>{TIER_ICON[s.tier]} {s.tier} </Text>
-              <Text strikethrough={s.status === 'skip'}>{s.title}</Text>
+              <Text strikethrough={isSkip}>{s.title}</Text>
+              {s.tier && (
+                <Text color={TIER_COLOR[s.tier]}>
+                  {' '}⤷ {s.tier}{isConfirmed ? ' ✓' : onTier.some(w => w.status === 'running') ? ' ●' : canDelegate ? ' ?' : ''}
+                </Text>
+              )}
             </Text>
           </Box>
           {open && (
             <Box flexDirection="column">
-              <Text wrap="wrap">
-                <Text dimColor>{pad}model </Text>
-                <Text bold color={TIER_COLOR[s.tier]}>{s.tier}</Text>
-                <Text dimColor> · {TIER_JOB[s.tier]}</Text>
-              </Text>
               {deps.length > 0 && <Text wrap="wrap" dimColor>{pad}after: {deps.join(', ')}</Text>}
               {peers.length > 0 && <Text wrap="wrap" dimColor>{pad}in parallel with: {peers.join(', ')}</Text>}
-              {s.tier !== 'opus' && onTier.length === 0 && <Text dimColor>{pad}no {s.tier} subagent started yet</Text>}
-              {s.tier !== 'opus' &&
-                onTier.map(w => (
-                  <Text key={`pw-${s.id}-${w.id}`} wrap="truncate-end">
-                    <Text dimColor>{pad}⤷ </Text>
-                    <Text color={WORKER_COLOR[w.status]}>{w.type}</Text>
-                    <Text dimColor> {w.description}</Text>
-                  </Text>
-                ))}
+              {s.tier && (
+                <Text wrap="wrap">
+                  <Text dimColor>{pad}</Text>
+                  <Text color={TIER_COLOR[s.tier]}>⤷ a {s.tier} subagent could take this</Text>
+                  {s.why !== '' && <Text dimColor> · {s.why}</Text>}
+                </Text>
+              )}
+              {canDelegate && (
+                <Box>
+                  <Text dimColor>{pad}</Text>
+                  <Button key={`dg-${s.id}`} label={`delegate to ${s.tier}`} onPress={() => void answer($, ask, delegationText(s))} />
+                  <Text dimColor> otherwise the model does it itself</Text>
+                </Box>
+              )}
+              {isConfirmed && <Text dimColor>{pad}✓ delegation confirmed{a?.state === 'sent' ? ' · read by the model' : ' · reaches the next step'}</Text>}
+              {onTier.map(w => (
+                <Text key={`pw-${s.id}-${w.id}`} wrap="truncate-end">
+                  <Text dimColor>{pad}⤷ </Text>
+                  <Text color={WORKER_COLOR[w.status]}>{w.type}</Text>
+                  <Text dimColor> {w.description}</Text>
+                </Text>
+              ))}
             </Box>
           )}
         </Box>
@@ -1478,32 +1333,37 @@ export const register: Register = on => {
       )
     }
 
-    // A question from the plan or the prompt check: one-click options or a typed answer, which reaches the model.
-    const questionRow = (prefix: string, q: Plan['questions'][number], i: number) => {
+    // A question from the plan or the prompt check: numbered options (digits press them on the first open
+    // question, ★ = recommended), "0" keeps the model's default, or a typed answer. The answer reaches the model.
+    const questionRow = (prefix: string, q: Plan['questions'][number], i: number, isHot: boolean) => {
       const a = answered[q.ask]
       const isAsking = !a || a.state === 'draft'
 
       return (
         <Box key={`${prefix}-${i}`} flexDirection="column" marginTop={i ? 1 : 0}>
           <Text wrap="wrap">
-            <Text color={isAsking ? C.info : C.ok}>{isAsking ? '? ' : '✓ '}</Text>
+            <Text color={isAsking ? C.info : C.ok} bold>{isAsking ? '? ' : '✓ '}</Text>
             {q.ask}
           </Text>
-          {q.why !== '' && <Text wrap="wrap" dimColor>{'  '}→ {q.why}</Text>}
+          {q.why !== '' && <Text wrap="wrap" dimColor>{'  '}{q.why}</Text>}
           {isAsking ? (
             <Box flexDirection="column">
-              {q.fallback !== '' && <Text wrap="wrap" dimColor>{'  '}default: {q.fallback}</Text>}
-              {q.options.length > 0 && (
-                <Box gap={1} flexWrap="wrap">
-                  {q.options.map((o, oi) => (
-                    <Button key={`${prefix}-${i}-o-${oi}`} plain={oi > 0 || undefined} label={o} onPress={() => void answer($, q.ask, o)} />
-                  ))}
+              {q.options.map((o, oi) => (
+                <Box key={`${prefix}-${i}-r-${oi}`}>
+                  <Text>{'  '}</Text>
+                  <Button key={`${prefix}-${i}-o-${oi}`} plain hotkey={isHot ? String(oi + 1) : undefined} label={oi === 0 ? `${o} ★` : o} onPress={() => void answer($, q.ask, o)} />
+                </Box>
+              ))}
+              {q.fallback !== '' && (
+                <Box>
+                  <Text>{'  '}</Text>
+                  <Button key={`${prefix}-${i}-d`} plain dimColor hotkey={isHot ? '0' : undefined} label={`keep the default: ${q.fallback}`} onPress={() => void answer($, q.ask, q.fallback)} />
                 </Box>
               )}
               <Input
                 key={`${prefix}-${i}-in`}
                 label="  ↳ "
-                placeholder={q.options.length ? 'or write something else' : 'your answer'}
+                placeholder={q.options.length ? 'or type another answer' : 'your answer'}
                 value={a?.text ?? ''}
                 submitLabel="send"
                 onInput={v => void update($, answers, all => ({ ...all, [q.ask]: { text: v, state: 'draft' as const } }))}
@@ -1514,9 +1374,9 @@ export const register: Register = on => {
             <Box gap={1}>
               <Text wrap="wrap">
                 <Text color={a.state === 'sent' ? C.ok : C.run}>{'  '}↳ {a.text}</Text>
-                <Text dimColor>{a.state === 'sent' ? ' · read' : ' · reaches the next step'}</Text>
+                <Text dimColor>{a.state === 'sent' ? ' · read by the model' : ' · reaches the next step'}</Text>
               </Text>
-              {a.state === 'sent' && <Button key={`${prefix}-${i}-redo`} plain label="change" onPress={() => void update($, answers, all => ({ ...all, [q.ask]: { text: a.text, state: 'draft' as const } }))} />}
+              <Button key={`${prefix}-${i}-redo`} plain label="[change]" onPress={() => void update($, answers, all => ({ ...all, [q.ask]: { text: a.text, state: 'draft' as const } }))} />
             </Box>
           )}
         </Box>
@@ -1536,14 +1396,39 @@ export const register: Register = on => {
 
     const thinkView = (
       <Box flexDirection="column" gap={1}>
-        {lastPrompt !== '' && (
-          <Text wrap="truncate-end">
-            <Text color={C.accent}>▸ </Text>
-            <Text italic>{lastPrompt.replace(/\s+/g, ' ')}</Text>
-          </Text>
+        <Box flexDirection="column">
+          {lastPrompt !== '' && (
+            <Text wrap="truncate-end">
+              <Text color={C.accent}>▸ </Text>
+              <Text italic>{lastPrompt.replace(/\s+/g, ' ')}</Text>
+            </Text>
+          )}
+          {phaseLine}
+        </Box>
+        {(openQ.length > 0 || suggested.length > 0) && (
+          <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1}>
+            <Text bold color={C.info}>
+              NEEDS YOU{' '}
+              <Text dimColor>
+                {[openQ.length ? `${openQ.length} question${openQ.length > 1 ? 's' : ''}` : '', suggested.length ? `${suggested.length} delegation${suggested.length > 1 ? 's' : ''} to confirm` : ''].filter(Boolean).join(' · ')}
+              </Text>
+            </Text>
+            {openQ.map((q, i) => questionRow('q', q, i, i === 0))}
+            {suggested.map((s, i) => (
+              <Box key={`sg-${s.id}`} marginTop={openQ.length || i ? 1 : 0}>
+                <Text wrap="truncate-end">
+                  <Text color={TIER_COLOR[s.tier ?? 'opus']}>⤷ </Text>
+                  {s.title}
+                  <Text dimColor> → {s.tier}{s.why !== '' ? ` · ${s.why}` : ''} </Text>
+                </Text>
+                <Button key={`sgb-${s.id}`} plain label={`[delegate]`} onPress={() => void answer($, delegationAsk(s), delegationText(s))} />
+              </Box>
+            ))}
+            <Text dimColor>{openQ.length ? '1-4 pick · 0 keeps the default · ' : ''}unanswered = the model goes with its default</Text>
+          </Box>
         )}
         {checkNow &&
-          section('check', `PROMPT CHECK${checkNow.running ? ' …' : checkNow.note ? ' ✗' : ` ${checkNow.clarity}/10`}`, true, () => (
+          section('check', `PROMPT CHECK${checkNow.running ? ' …' : checkNow.note ? ' ✗' : ` ${checkNow.clarity}/10`}`, !planNow, () => (
             <Box flexDirection="column">
               {checkNow.running && <Text color={C.run}>● haiku is reading your prompt…</Text>}
               {checkNow.note !== '' && <Text wrap="wrap" dimColor>{checkNow.note}</Text>}
@@ -1561,13 +1446,12 @@ export const register: Register = on => {
                       {m}
                     </Text>
                   ))}
-                  {checkNow.questions.length > 0 && <Box flexDirection="column" marginTop={1}>{checkNow.questions.map((q, i) => questionRow('cq', q, i))}</Box>}
                   {checkNow.better !== '' && betterRow('cbetter', checkNow.better, 1)}
                 </Box>
               )}
             </Box>
           ))}
-        {!planNow && <Text dimColor>No plan yet for this request.</Text>}
+        {!planNow && phase !== 'idle' && <Text dimColor>● the model is reading the request; its plan lands here first.</Text>}
         {planNow &&
           section('goal', 'UNDERSTAND', true, () => (
             <Box flexDirection="column">
@@ -1587,18 +1471,17 @@ export const register: Register = on => {
                   {planNow.approach}
                 </Text>
               )}
-            </Box>
-          ))}
-        {planNow &&
-          planNow.assumptions.length > 0 &&
-          section('assume', `ASSUMPTIONS ${planNow.assumptions.length}`, false, () => (
-            <Box flexDirection="column">
-              {planNow.assumptions.map((a, i) => (
-                <Text key={`as-${i}`} wrap="wrap">
-                  <Text color={C.run}>~ </Text>
-                  {a}
-                </Text>
-              ))}
+              {planNow.assumptions.length > 0 && (
+                <Box flexDirection="column">
+                  {planNow.assumptions.map((a, i) => (
+                    <Text key={`as-${i}`} wrap="wrap">
+                      <Text color={C.run}>~ </Text>
+                      <Text dimColor>assumes </Text>
+                      {a}
+                    </Text>
+                  ))}
+                </Box>
+              )}
             </Box>
           ))}
         {planNow &&
@@ -1614,15 +1497,12 @@ export const register: Register = on => {
                     {li < planLevels.length - 1 && <Text dimColor>{'   │'}</Text>}
                   </Box>
                 ))}
+                <Text dimColor wrap="truncate-end">
+                  ○ todo ● running ✓ done ⊘ skipped{planNow.steps.some(s => s.tier) ? ' · ⤷ a subagent could take it (▸ to allow)' : ''}
+                </Text>
               </Box>
             ),
-            <Text>
-              {mix.filter(([, n]) => n > 0).map(([t, n]) => (
-                <Text key={`mix-${t}`} color={TIER_COLOR[t]} bold={t === 'opus'}>
-                  {TIER_ICON[t]}{n}{' '}
-                </Text>
-              ))}
-            </Text>,
+            <Text dimColor>{planLevels.length > 1 ? `${planLevels.length} levels` : ''}</Text>,
           )}
         {section(
           'exec',
@@ -1639,6 +1519,7 @@ export const register: Register = on => {
                       {s.agentId ? (s.isDone ? '◆' : '◇') : s.isDone ? '■' : '▪'}
                     </Text>
                   ))}
+                  <Text dimColor> ■ main ◆ worker</Text>
                 </Text>
               )}
               {graphReady && turnSteps.length > 0 && (
@@ -1660,35 +1541,6 @@ export const register: Register = on => {
           ),
           <Text dimColor>{k(tokensIn)}↑ {k(tokensOut)}↓</Text>,
         )}
-        {retroNow &&
-          section(
-            'retro',
-            `RETROSPECTIVE ${retroNow.findings.length ? `${retroNow.findings.length} to optimize` : 'ok'}`,
-            true,
-            () => (
-              <Box flexDirection="column">
-                <Text wrap="truncate-end" dimColor>
-                  {retroNow.steps} steps · {usd(retroNow.cost)} · {Math.round(retroNow.cheapShare * 100)}% of cost on haiku/sonnet
-                </Text>
-                {retroNow.findings.length === 0 && <Text color={C.ok}>✓ delegation was right for this turn</Text>}
-                {retroNow.findings.map((f, i) => (
-                  <Text key={`rf-${i}`} wrap="wrap">
-                    <Text color={f.kind === 'escalated' ? C.bad : C.run}>{f.kind === 'escalated' ? '⇡ ' : f.kind === 'plan' ? '≠ ' : '↓ '}</Text>
-                    {f.text}
-                    {f.saving > 0 && <Text color={C.ok}> · ~{usd(f.saving)}</Text>}
-                    {(f.wasted ?? 0) > 0 && <Text color={C.bad}> · wasted {usd(f.wasted ?? 0)}</Text>}
-                  </Text>
-                ))}
-                {retroNow.saving > 0 && (
-                  <Text wrap="truncate-end">
-                    <Text dimColor>possible savings </Text>
-                    <Text color={C.ok}>~{usd(retroNow.saving)}</Text>
-                    <Text dimColor> ({Math.round((retroNow.saving / Math.max(retroNow.cost, 1e-9)) * 100)}% of the turn, estimate)</Text>
-                  </Text>
-                )}
-              </Box>
-            ),
-          )}
         {planNow &&
           planNow.savings.length > 0 &&
           section('save', `SAVINGS ${planNow.savings.length}`, false, () => (
@@ -1701,13 +1553,11 @@ export const register: Register = on => {
               ))}
             </Box>
           ))}
-        {planNow && (planNow.questions.length > 0 || planNow.betterPrompt) && (
-          <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1}>
-            <Text bold color={C.info}>HOW YOU CAN HELP ME BE PRECISE</Text>
-            {planNow.questions.map((q, i) => questionRow('q', q, i))}
-            {planNow.betterPrompt !== '' && betterRow('better', planNow.betterPrompt, planNow.questions.length ? 1 : 0)}
-          </Box>
-        )}
+        {questions.some(q => !isOpenQ(q.ask)) &&
+          section('answered', `ANSWERED ${questions.filter(q => !isOpenQ(q.ask)).length}`, false, () => (
+            <Box flexDirection="column">{questions.filter(q => !isOpenQ(q.ask)).map((q, i) => questionRow('a', q, i, false))}</Box>
+          ))}
+        {planNow && planNow.betterPrompt !== '' && section('better', 'NEXT TIME', false, () => betterRow('better', planNow.betterPrompt, 0))}
         {section('tools', 'TOOLS IN SESSION', false, () => (
           <Text wrap="wrap">
             {Object.entries(counts)
@@ -1851,7 +1701,6 @@ export const register: Register = on => {
                     lens: [
                       { key: 'check', label: 'prompt check', on: isChecking, what: 'haiku reads each prompt at submit' },
                       { key: 'plan', label: 'miniplan', on: isPlanFirst, what: 'a plan in Flow before the first tool' },
-                      { key: 'routing', label: 'routing', on: isRouting, what: 'auto delegation; off = only [haiku]/[sonnet] tags' },
                       ...(graphReady ? [{ key: 'graph', label: 'codegraph first', on: isGraphFirst, what: 'codegraph_explore before Grep/Glob' }] : []),
                     ],
                   },
@@ -1864,7 +1713,7 @@ export const register: Register = on => {
                     edit: patch => void update($, hookDraft, d => (d ? { ...d, ...patch } : d)),
                     save: () => void saveHook($),
                     refresh: () => void loadHooks($),
-                    lens: key => void (key === 'check' ? flipCheck($) : key === 'routing' ? flipRouting($) : key === 'plan' ? update($, planFirst, v => !v) : update($, graphFirst, v => !v)),
+                    lens: key => void (key === 'check' ? flipCheck($) : key === 'plan' ? update($, planFirst, v => !v) : update($, graphFirst, v => !v)),
                   },
                 ) : null}
         <Box flexGrow={1} />
