@@ -55,3 +55,49 @@ export const isolated = (list: readonly Pick<Memory, 'name' | 'links'>[]) => {
 
   return list.filter(m => m.links.length === 0 && !back[m.name]?.length).map(m => m.name)
 }
+
+// The "analyze" verdict on one memory, against the open project: does it still help the model here?
+export const VERDICTS = ['relevant', 'stale', 'irrelevant'] as const
+export type Verdict = { verdict: (typeof VERDICTS)[number]; why: string }
+
+// The model's reply → verdicts by name. It answers a JSON array; anything around it (a fence, a sentence) is ignored,
+// and only names that exist with a known verdict are kept.
+export const parseVerdicts = (text: string, names: readonly string[]) => {
+  const out: Record<string, Verdict> = {}
+  const json = text.slice(text.indexOf('['), text.lastIndexOf(']') + 1)
+  let rows: unknown = []
+  try {
+    rows = JSON.parse(json)
+  } catch {
+    return out
+  }
+  if (!Array.isArray(rows)) return out
+  for (const r of rows as { name?: unknown; verdict?: unknown; why?: unknown }[]) {
+    const name = String(r?.name ?? '')
+    const verdict = String(r?.verdict ?? '') as Verdict['verdict']
+    if (names.includes(name) && VERDICTS.includes(verdict)) out[name] = { verdict, why: String(r?.why ?? '').trim() }
+  }
+
+  return out
+}
+
+// The graph as Mermaid source, to paste in any viewer (GitHub, mermaid.live): one class per type, a missing target dashed.
+export const toMermaid = (list: readonly Pick<Memory, 'name' | 'type' | 'links'>[], verdicts: Record<string, Verdict> = {}) => {
+  const id = (name: string) => `m_${name.replace(/[^a-zA-Z0-9]/g, '_')}`
+  const names = new Set(list.map(m => m.name))
+  const mark = { relevant: '✓ ', stale: '◐ ', irrelevant: '✗ ' } as const
+  const lines = ['graph LR']
+  for (const m of list) lines.push(`  ${id(m.name)}["${verdicts[m.name] ? mark[verdicts[m.name]!.verdict] : ''}${m.name}<br/><small>${m.type}</small>"]:::${m.type}`)
+  for (const m of list)
+    for (const to of m.links) lines.push(names.has(to) ? `  ${id(m.name)} --> ${id(to)}` : `  ${id(m.name)} -.-> ${id(to)}["✗ ${to}"]:::missing`)
+  lines.push(
+    '  classDef user fill:#f5d0fe,stroke:#a21caf',
+    '  classDef feedback fill:#fef08a,stroke:#a16207',
+    '  classDef project fill:#a5f3fc,stroke:#0e7490',
+    '  classDef reference fill:#bfdbfe,stroke:#1d4ed8',
+    '  classDef untyped fill:#e5e7eb,stroke:#6b7280',
+    '  classDef missing fill:#fecaca,stroke:#b91c1c,stroke-dasharray:4',
+  )
+
+  return `${lines.join('\n')}\n`
+}

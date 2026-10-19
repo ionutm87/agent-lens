@@ -56,8 +56,18 @@ export const ANSWERS_TAG = '[Agent Lens · answers]'
 
 export const PLAN_RULE = `At the start of every request, however short (even ones of 1-2 tool calls), before any other tool, call ${PLAN_TOOL_ID} with a mini-plan, even if you are not in plan mode: what you understood (goal) and how you act (approach), the clarity, the assumptions, the steps with model and dependencies, the efficiencies, and the questions that would make the user more specific (each with options and what you do by default, so you do not stop and wait). Call it again only when the plan changes or a phase ends; at the end mark the steps done. The user answers questions from the Flow tab: the answers arrive marked ${ANSWERS_TAG}, either after a tool result or as a new message. They override your assumptions: apply them immediately, and if they change the steps, republish the plan without the answered questions. Write the plan fields in the language of the user's latest prompt.`
 
-const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : [])
+export const strs = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim() !== '') : [])
 const oneOf = <T extends string>(v: unknown, list: readonly T[], fallback: T) => (list.includes(v as T) ? (v as T) : fallback)
+
+// Questions from a model (the plan, the prompt check): a bare string or { ask, why, options, default }.
+export const questionsOf = (v: unknown): Plan['questions'] =>
+  (Array.isArray(v) ? v : [])
+    .map(q =>
+      typeof q === 'string'
+        ? { ask: q, why: '', options: [], fallback: '' }
+        : { ask: String(q?.ask ?? ''), why: String(q?.why ?? ''), options: strs(q?.options).slice(0, 4), fallback: typeof q?.default === 'string' ? q.default : '' },
+    )
+    .filter(q => q.ask.trim() !== '')
 
 // The input comes from the model: any missing or wrongly typed field gets a safe value.
 export const normalizePlan = (input: unknown, at: number): Plan => {
@@ -70,20 +80,12 @@ export const normalizePlan = (input: unknown, at: number): Plan => {
     after: strs(s?.after),
     status: oneOf(s?.status, STATUSES, 'todo'),
   }))
-  const questions = (Array.isArray(o.questions) ? o.questions : [])
-    .map(q =>
-      typeof q === 'string'
-        ? { ask: q, why: '', options: [], fallback: '' }
-        : { ask: String(q?.ask ?? ''), why: String(q?.why ?? ''), options: strs(q?.options).slice(0, 4), fallback: typeof q?.default === 'string' ? q.default : '' },
-    )
-    .filter(q => q.ask.trim() !== '')
-
   return {
     goal: String(o.goal ?? ''),
     approach: typeof o.approach === 'string' ? o.approach : '',
     clarity: Math.max(0, Math.min(10, Math.round(Number(o.clarity) || 0))),
     assumptions: strs(o.assumptions),
-    questions,
+    questions: questionsOf(o.questions),
     betterPrompt: typeof o.better_prompt === 'string' ? o.better_prompt : '',
     steps,
     savings: strs(o.savings),

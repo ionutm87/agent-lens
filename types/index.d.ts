@@ -50,7 +50,7 @@ export type Validation = {
   tier?: 'opus' | 'sonnet' | 'haiku'
 }
 
-export type Tab = 'think' | 'changes' | 'workers' | 'memories' | 'styles'
+export type Tab = 'think' | 'changes' | 'memories' | 'styles' | 'hooks'
 
 export type Change = { path: string; code: string; staged: boolean; unstaged: boolean; add: number; del: number }
 
@@ -103,6 +103,9 @@ export type MemoryMeta = {
 
 export type MemoryView = { name: string; body: string }
 
+// The last "analyze" run: a verdict per memory name (relevant / stale / irrelevant, with the why), kept per project.
+export type MemoryAudit = { at: number; running: boolean; note: string; verdicts: Record<string, { verdict: 'relevant' | 'stale' | 'irrelevant'; why: string }> }
+
 // Output styles: Markdown files in <config>/output-styles/. The draft is the one being edited, line by line.
 export type Style = { file: string; name: string; description: string; keep: boolean; body: string }
 export type StyleDraft = { file: string; description: string; lines: string[]; dirty: boolean }
@@ -110,6 +113,17 @@ export type StyleDraft = { file: string; description: string; lines: string[]; d
 // Turn retrospective: where cheaper delegation was possible. saving = USD estimate; wasted = cost lost on an escalation.
 export type RetroFinding = { kind: 'read' | 'edit' | 'worker' | 'escalated' | 'plan'; text: string; saving: number; wasted?: number }
 export type Retro = { turnId: string; at: number; steps: number; cost: number; cheapShare: number; saving: number; findings: RetroFinding[] }
+
+// The prompt check: Haiku's read of the prompt at submit (clarity, what is missing, questions, a rewrite).
+export type PromptCheck = { at: number; running: boolean; clarity: number; missing: string[]; questions: Plan['questions']; better: string; note: string }
+
+// A Claude Code hook from a settings file (global, project shared, project local); isOff = parked in the
+// sibling *.hooks-off.json, since settings have no per-hook switch.
+export type HookEntry = { type: string; timeout?: number; [key: string]: unknown }
+export type HookRow = { id: string; scope: 'global' | 'project' | 'local'; file: string; event: string; matcher: string; hook: HookEntry; isOff: boolean }
+// The hook open in the tab; row null = a new one, written to `scope`'s file.
+export type HookDraft = { row: HookRow | null; scope: 'project' | 'local'; event: string; matcher: string; text: string; timeout: string }
+export type HookPaths = { global: string; project: string; local: string }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -146,6 +160,7 @@ declare module 'claude-code' {
       memUse: Record<string, MemoryUse>
       memView: MemoryView | null
       memType: string
+      memAudit: MemoryAudit
       styles: Style[]
       styleActive: string
       styleDraft: StyleDraft | null
@@ -156,6 +171,13 @@ declare module 'claude-code' {
       planFirst: boolean
       planAsked: boolean
       turnAt: number
+      checkOn: boolean
+      promptCheck: PromptCheck | null
+      hookRows: HookRow[]
+      hookDraft: HookDraft | null
+      hookNote: string
+      hooksLoaded: boolean
+      hookPaths: HookPaths
     }
   }
 }

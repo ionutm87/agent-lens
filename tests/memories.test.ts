@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { backlinks, isolated, namesIn, parseIndex, parseMemory, projectSlug } from '../hooks/memories'
+import { backlinks, isolated, namesIn, parseIndex, parseMemory, projectSlug, parseVerdicts, toMermaid } from '../hooks/memories'
 import '../hooks/register'
 
 test('project slug: same as the engine, only the open project memory', () => {
@@ -63,17 +63,40 @@ test('Memories tab: the graph, the index in context and memory neighbors', async
     value: e.path === '/m' ? Object.keys(files).map(f => ({ name: f.slice(3), kind: 'file' as const, size: files[f]?.length ?? 0, mtimeMs: 0, isLink: false })) : [],
   }))
   on('fs.read', ($, e) => ({ value: files[e.path] ?? '' }))
+  on('model.complete', () => ({ value: { isAnswered: true, text: '[{"name":"a","verdict":"stale","why":"livrat deja"},{"name":"b","verdict":"relevant","why":"ok"}]' } }) as never)
 
   const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   await ui.press({ key: 'tab-memories' })
-  expect(await ui.find({ type: 'Text', text: /in prompt/ })).toBeDefined()
-  expect(await ui.find({ type: 'Button', text: /prima/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /IN THE PROMPT/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /FEEDBACK/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /prima/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'go-a-b' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lipsa \(does not exist\)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /AutoMem · 1\.2k tok/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /outside the index/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Not analyzed yet/ })).toBeDefined()
+  // "analyze": Sonnet's verdicts land on the nodes, the flagged one shows its why instead of its description.
+  await ui.press({ key: 'mem-analyze' })
+  expect(await ui.find({ type: 'Text', text: /◐ 1 stale/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /livrat deja/ })).toBeDefined()
   await ui.press({ key: 'mo-a' })
   expect(await ui.find({ type: 'Text', text: /cârligul lui a/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /lipsa \(does not exist yet\)/ })).toBeDefined()
   await ui.press({ key: 'go-out-b' })
   expect(await ui.find({ type: 'Text', text: /missing from the index/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('analyze: verdicts are read from the JSON array, unknown names and verdicts dropped', () => {
+  const text = 'Here:\n```json\n[{"name":"a","verdict":"stale","why":" done in M2 "},{"name":"ghost","verdict":"relevant"},{"name":"b","verdict":"maybe"}]\n```'
+  expect(parseVerdicts(text, ['a', 'b'])).toEqual({ a: { verdict: 'stale', why: 'done in M2' } })
+  expect(parseVerdicts('no json here', ['a'])).toEqual({})
+})
+
+test('mermaid: one node per memory, a missing target dashed, the verdict on the label', () => {
+  const src = toMermaid([{ name: 'cip-pdf', type: 'project', links: ['layout', 'gone'] }, { name: 'layout', type: 'feedback', links: [] }], { 'cip-pdf': { verdict: 'relevant', why: '' } })
+  expect(src.startsWith('graph LR\n')).toBe(true)
+  expect(src).toContain('m_cip_pdf["✓ cip-pdf<br/><small>project</small>"]:::project')
+  expect(src).toContain('m_cip_pdf --> m_layout')
+  expect(src).toContain('m_cip_pdf -.-> m_gone["✗ gone"]:::missing')
 })

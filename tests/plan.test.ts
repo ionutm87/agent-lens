@@ -39,3 +39,8 @@ test('the question carries its options (at most 4) and the default action; the a
   expect(answersMessage([])).toBe('')
   expect(answersMessage([{ ask: 'Which lists?', text: 'active' }])).toBe(`${ANSWERS_TAG}\n- Which lists?\n  → active`)
 })
+
+test('the mini-plan carries "how I act"; its absence does not break the plan', () => {
+  expect(normalizePlan({ goal: 'g', approach: 'delegate the search to haiku', steps: [] }, 0).approach).toBe('delegate the search to haiku')
+  expect(normalizePlan({ goal: 'g', steps: [] }, 0).approach).toBe('')
+})

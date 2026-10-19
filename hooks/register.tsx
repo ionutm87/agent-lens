@@ -1,15 +1,18 @@
 import { atom, read, update } from 'claude-code'
 import type { Engine, HookFor, Register, RenderChildren } from 'claude-code'
 
-import type { Answer, Change, Diff, GitNote, Memory, MemoryMeta, MemoryUse, MemoryView, Miss, Plan, PlanStep, Repo, Retro, Step, StepView, Style, StyleDraft, Tab, Totals, Validation, Worker } from '../types'
+import type { Answer, Change, Diff, GitNote, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Miss, Plan, PlanStep, PromptCheck, Repo, Retro, Step, StepView, Style, StyleDraft, Tab, Totals, Validation, Worker } from '../types'
 import { branchLabel, cleanMessage, clip, outcomeOf, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
 import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, layers, normalizePlan } from './plan'
 import { INDEX, memoriesView } from './memories-tab'
-import { workersView } from './workers-tab'
 import { stylesView } from './styles-tab'
+import { hooksView } from './hooks-tab'
+import { checkPrompt, parseCheck, worthChecking } from './check'
+import { hasHook, hookFromDraft, mainText, offFile, parseSettings, replaceHook, rowsOf, serialize, withHook, withoutHook } from './settings-hooks'
+import type { HookRef, Settings } from './settings-hooks'
 import { activeStyle, buildStyle, parseStyle, slugName, withOutputStyle } from './styles'
 import { retroMessage, retroOf } from './retro'
-import { namesIn, parseIndex, parseMemory, projectSlug } from './memories'
+import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, toMermaid } from './memories'
 import { ESCALATE, ESCALATE_RULE, MODEL_IDS, VALIDATOR, VALIDATOR_PROMPT, addMiss, costOf, escalationOf, learned, tagged, tierOf, verdictOf, wordsOf } from './router'
 import type { Tier } from './router'
 
@@ -21,10 +24,11 @@ const skillsUsed = atom({ plugin: 'agent-lens', key: 'skillsUsed' } as const, {}
 const toolCounts = atom({ plugin: 'agent-lens', key: 'toolCounts' } as const, {})
 const prompt = atom({ plugin: 'agent-lens', key: 'prompt' } as const, '')
 const tab = atom({ plugin: 'agent-lens', key: 'tab' } as const, 'think' as Tab)
-// What is open/closed in Flow and Workers, by key; a missing key = the row's default state.
+// What is open/closed in Flow, by key; a missing key = the row's default state.
 const retro = atom({ plugin: 'agent-lens', key: 'retro' } as const, null as Retro | null)
 const folds = atom({ plugin: 'agent-lens', key: 'fold' } as const, {} as Record<string, boolean>)
-const routing = atom({ plugin: 'agent-lens', key: 'routing' } as const, true)
+// Routing (delegating down, the learned tier bumps, the retrospective) is off until the person turns it on.
+const routing = atom({ plugin: 'agent-lens', key: 'routing' } as const, false)
 const edited = atom({ plugin: 'agent-lens', key: 'edited' } as const, [])
 const validations = atom({ plugin: 'agent-lens', key: 'validations' } as const, [])
 const totals = atom({ plugin: 'agent-lens', key: 'totals' } as const, { steps: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0 } as Totals)
@@ -45,6 +49,7 @@ const memMeta = atom({ plugin: 'agent-lens', key: 'memMeta' } as const, { dir: '
 const memUse = atom({ plugin: 'agent-lens', key: 'memUse' } as const, {} as Record<string, MemoryUse>)
 const memView = atom({ plugin: 'agent-lens', key: 'memView' } as const, null as MemoryView | null)
 const memType = atom({ plugin: 'agent-lens', key: 'memType' } as const, 'all')
+const memAudit = atom({ plugin: 'agent-lens', key: 'memAudit' } as const, { at: 0, running: false, note: '', verdicts: {} } as MemoryAudit)
 const styles = atom({ plugin: 'agent-lens', key: 'styles' } as const, [] as Style[])
 const styleActive = atom({ plugin: 'agent-lens', key: 'styleActive' } as const, '')
 const styleDraft = atom({ plugin: 'agent-lens', key: 'styleDraft' } as const, null as StyleDraft | null)
@@ -58,6 +63,16 @@ const misses = atom({ plugin: 'agent-lens', key: 'misses' } as const, [] as Miss
 const planFirst = atom({ plugin: 'agent-lens', key: 'planFirst' } as const, true)
 const planAsked = atom({ plugin: 'agent-lens', key: 'planAsked' } as const, false)
 const turnAt = atom({ plugin: 'agent-lens', key: 'turnAt' } as const, 0)
+const checkOn = atom({ plugin: 'agent-lens', key: 'checkOn' } as const, true)
+const promptCheck = atom({ plugin: 'agent-lens', key: 'promptCheck' } as const, null as PromptCheck | null)
+const hookRows = atom({ plugin: 'agent-lens', key: 'hookRows' } as const, [] as HookRow[])
+const hookDraft = atom({ plugin: 'agent-lens', key: 'hookDraft' } as const, null as HookDraft | null)
+const hookNote = atom({ plugin: 'agent-lens', key: 'hookNote' } as const, '')
+const hooksLoaded = atom({ plugin: 'agent-lens', key: 'hooksLoaded' } as const, false)
+const hookPaths = atom({ plugin: 'agent-lens', key: 'hookPaths' } as const, { global: '', project: '', local: '' } as HookPaths)
+
+// A turn whose prompt starts with [haiku]/[sonnet]/[opus] runs on that model; any other stays on the session model.
+const PINNED = 'picked by you'
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 
@@ -97,14 +112,6 @@ const WINDOWS: Record<string, string> = { five_hour: '5h', seven_day: '7 days', 
 const pctColor = (pct: number, bad: number) => (pct >= bad ? C.bad : pct >= bad - 20 ? C.run : C.ok)
 
 const secs = (ms: number) => (ms >= 60000 ? `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s` : `${Math.round(ms / 1000)}s`)
-
-// "Read, Read, Read, Bash" → "Read×3 Bash"
-export const tally = (names: readonly string[]) => {
-  const counts = new Map<string, number>()
-  for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1)
-
-  return [...counts].map(([name, n]) => (n > 1 ? `${name}×${n}` : name)).join(' ')
-}
 
 // What a tool does, briefly: the main input field (command, file, search), otherwise JSON.
 export const brief = (input: unknown) => {
@@ -310,7 +317,9 @@ const commitStaged = async ($: Engine) => {
 }
 
 // After each main-loop turn: the execution analysis (what could have been delegated more cheaply) goes into Flow.
+// Only with routing on: off, delegation is not wanted, so neither is advice about it.
 const runRetro = async ($: Engine, turnId: string) => {
+  if (!(await read($, routing))) return
   const all = await read($, steps)
   const since = await read($, turnAt)
   const turnWorkers = (await read($, workers)).filter(w => w.startedAt >= since && w.agentId)
@@ -411,6 +420,58 @@ const createStyle = async ($: Engine, name: string) => {
   }
 }
 
+// The "analyze" button: Sonnet reads every memory next to the project's CLAUDE.md and recent commits and says, per
+// memory, whether it still helps here. It only marks; nothing is deleted. Kept per project in $.store.
+const auditKey = async ($: Engine) => `memaudit:${await $.session.root()}`
+
+const analyzeMemories = async ($: Engine) => {
+  const list = await read($, memories)
+  const { dir } = await read($, memMeta)
+  if (!list.length || (await read($, memAudit)).running) return
+  await update($, memAudit, a => ({ ...a, running: true, note: '' }))
+  try {
+    const root = await $.session.root()
+    const now = await $.clock.now()
+    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10)
+    const notes: string[] = []
+    for (const m of list) notes.push(`### ${m.name} (type ${m.type}, changed ${day(m.mtimeMs)})\n${clip(await $.fs.read(`${dir}/${m.file}`).catch(() => ''), 1500)}`)
+    const guide = await $.fs.read(`${root}/CLAUDE.md`).catch(() => '')
+    const log = await git($, root, ['log', '-25', '--format=%as %s']).catch(() => ({ stdout: '' }))
+    const res = await $.model.complete({
+      model: 'sonnet',
+      maxTokens: 4000,
+      timeoutMs: 120_000,
+      prompt: `You audit the persistent memory an AI coding agent keeps for one project. For EACH memory decide:
+- relevant: still true and useful when working on this project
+- stale: about this project, but done, outdated, contradicted by the guide or the recent commits, or its dates have passed
+- irrelevant: not about this project, or of no use to the agent here
+Today is ${day(now)}. Project root: ${root}.
+Answer ONLY a JSON array, one entry per memory: [{"name": "<exact name>", "verdict": "relevant" | "stale" | "irrelevant", "why": "<at most 14 words, same language as the memories>"}]
+
+Project guide (CLAUDE.md, start):
+${clip(guide, 5000) || '(none)'}
+
+Recent commits:
+${log.stdout || '(none)'}
+
+Memories:
+${notes.join('\n\n')}`,
+    })
+    const verdicts = res.isAnswered ? parseVerdicts(res.text, list.map(m => m.name)) : {}
+    const n = Object.keys(verdicts).length
+    if (!n) return void (await update($, memAudit, a => ({ ...a, running: false, note: `✗ Sonnet gave no usable verdict${res.isAnswered ? '' : ` (${res.reason})`}` })))
+    await update($, memAudit, () => ({ at: now, running: false, note: n < list.length ? `${list.length - n} memories got no verdict` : '', verdicts }))
+    await $.store.set(await auditKey($), { at: now, verdicts })
+  } catch (err) {
+    await update($, memAudit, a => ({ ...a, running: false, note: `✗ analysis failed: ${(err as Error).message}` }))
+  }
+}
+
+const copyMermaid = async ($: Engine, surface: any) => {
+  const r = await $.ui.copy({ text: toMermaid(await read($, memories), (await read($, memAudit)).verdicts), surface })
+  $.ui.toast(r.isCopied ? 'Mermaid copied: paste it into mermaid.live or a ```mermaid block' : `Not copied: ${r.reason}`)
+}
+
 const loadMemories = async ($: Engine) => {
   try {
     const usage = await $.session.usage({ breakdown: 'summary', columns: 60 })
@@ -433,6 +494,8 @@ const loadMemories = async ($: Engine) => {
     ]
     await update($, memories, () => list)
     await update($, memMeta, meta => ({ ...meta, dir, loaded: true, context, remember }))
+    const saved = (await $.store.get(await auditKey($))) as Pick<MemoryAudit, 'at' | 'verdicts'> | undefined
+    if (saved?.verdicts) await update($, memAudit, a => (a.at ? a : { ...a, at: saved.at, verdicts: saved.verdicts }))
   } catch {
     await update($, memMeta, meta => ({ ...meta, loaded: true }))
   }
@@ -475,6 +538,164 @@ const trackMemory: HookFor<'tool.call'> = async ($, e, next) => {
   return res
 }
 
+// The switches the person flips are kept across sessions.
+const flipRouting = async ($: Engine) => {
+  const isOn = !(await read($, routing))
+  await update($, routing, () => isOn)
+  await $.store.set('routing', isOn)
+}
+
+const flipCheck = async ($: Engine) => {
+  const isOn = !(await read($, checkOn))
+  await update($, checkOn, () => isOn)
+  await $.store.set('check', isOn)
+}
+
+// At submit, Haiku reads the prompt alone and suggests in Flow what to clarify; the model's turn does not wait.
+// A result for an older prompt is dropped.
+const runCheck = async ($: Engine, text: string, previous: string, at: number) => {
+  await update($, promptCheck, () => ({ at, running: true, clarity: 0, missing: [], questions: [], better: '', note: '' }))
+  let found: PromptCheck | null = null
+  let why = ''
+  try {
+    const res = await $.model.complete({ model: 'haiku', effort: 'low', maxTokens: 800, timeoutMs: 30_000, prompt: checkPrompt(text, previous) })
+    found = res.isAnswered ? parseCheck(res.text, at) : null
+    why = res.isAnswered ? '' : ` (${res.reason})`
+  } catch (err) {
+    why = ` (${(err as Error).message})`
+  }
+  await update($, promptCheck, cur => (cur?.at !== at ? cur : (found ?? { ...cur, running: false, note: `✗ haiku gave no check${why}` })))
+}
+
+const copyText = async ($: Engine, text: string, surface: any) => {
+  const r = await $.ui.copy({ text, surface })
+  $.ui.toast(r.isCopied ? 'Prompt copied' : `Not copied: ${r.reason}`)
+}
+
+// The "Hooks" tab: Claude Code's own hooks in the settings files. Global (<config>/settings.json) only turns on/off;
+// the project's (.claude/settings.json shared, .claude/settings.local.json just you) take any change.
+const readSettings = async ($: Engine, file: string) => parseSettings((await $.fs.exists(file)) ? await $.fs.read(file) : '')
+
+const loadHooks = async ($: Engine) => {
+  const rows: HookRow[] = []
+  const bad: string[] = []
+  try {
+    const root = await $.session.root()
+    const global = `${await configDir($)}/settings.json`
+    const project = `${root}/.claude/settings.json`
+    // A session started in the config dir's parent has no project of its own.
+    const paths: HookPaths = project === global ? { global, project: '', local: '' } : { global, project, local: `${root}/.claude/settings.local.json` }
+    await update($, hookPaths, () => paths)
+    for (const scope of ['global', 'project', 'local'] as const) {
+      if (!paths[scope]) continue
+      for (const isOff of [false, true]) {
+        const path = isOff ? offFile(paths[scope]) : paths[scope]
+        try {
+          rows.push(...rowsOf(await readSettings($, path), scope, paths[scope], isOff))
+        } catch (err) {
+          bad.push(`${path}: ${(err as Error).message}`)
+        }
+      }
+    }
+  } catch (err) {
+    bad.push((err as Error).message)
+  }
+  await update($, hookRows, () => rows)
+  if (bad.length) await update($, hookNote, () => `✗ not read, left alone: ${bad.join('; ')}`)
+  await update($, hooksLoaded, () => true)
+}
+
+const GONE = 'the file changed since the tab read it: reloaded, try again'
+
+const refOf = (r: HookRow): HookRef => ({ event: r.event, matcher: r.matcher, hook: r.hook })
+
+// Every change re-reads the hook's file and its *.hooks-off.json, so an edit made elsewhere meanwhile is never
+// overwritten (a hook no longer there is refused), and writes only the files that changed.
+const changeHooks = async ($: Engine, file: string, change: (on: Settings, off: Settings) => [Settings, Settings] | string, done: string) => {
+  try {
+    const on = await readSettings($, file)
+    const off = await readSettings($, offFile(file))
+    const out = change(on, off)
+    if (typeof out === 'string') {
+      await update($, hookNote, () => `✗ ${out}`)
+    } else {
+      if (serialize(out[0]) !== serialize(on)) await $.fs.write(file, serialize(out[0]))
+      if (serialize(out[1]) !== serialize(off)) await $.fs.write(offFile(file), serialize(out[1]))
+      await update($, hookDraft, () => null)
+      await update($, hookNote, () => `✓ ${done} · Claude Code reads it from the next session`)
+    }
+  } catch (err) {
+    await update($, hookNote, () => `✗ ${file} not changed: ${(err as Error).message}`)
+  }
+  await loadHooks($)
+}
+
+const toggleHook = ($: Engine, r: HookRow) =>
+  changeHooks(
+    $,
+    r.file,
+    (on, off) => {
+      const ref = refOf(r)
+      if (!hasHook(r.isOff ? off : on, ref)) return GONE
+
+      return r.isOff ? [withHook(on, ref), withoutHook(off, ref)] : [withoutHook(on, ref), withHook(off, ref)]
+    },
+    `${r.event} ${r.isOff ? 'on' : 'off'}`,
+  )
+
+// Global hooks are only turned on/off here, never deleted.
+const removeHook = async ($: Engine, r: HookRow) => {
+  if (r.scope === 'global') return
+  await changeHooks(
+    $,
+    r.file,
+    (on, off) => {
+      const ref = refOf(r)
+      if (!hasHook(r.isOff ? off : on, ref)) return GONE
+
+      return r.isOff ? [on, withoutHook(off, ref)] : [withoutHook(on, ref), off]
+    },
+    `${r.event} deleted`,
+  )
+}
+
+const saveHook = async ($: Engine) => {
+  const d = await read($, hookDraft)
+  if (!d || d.row?.scope === 'global') return
+  const timeout = d.timeout.trim()
+  if (!d.text.trim()) return void (await update($, hookNote, () => '✗ write what the hook runs'))
+  if (timeout && !/^[1-9]\d*$/.test(timeout)) return void (await update($, hookNote, () => '✗ timeout: whole seconds'))
+  const next: HookRef = { event: d.event, matcher: d.matcher.trim(), hook: hookFromDraft(d.row?.hook, d.text, timeout) }
+  const row = d.row
+  if (!row) {
+    const file = (await read($, hookPaths))[d.scope]
+    if (!file) return void (await update($, hookNote, () => '✗ this session has no project folder'))
+
+    return changeHooks($, file, (on, off) => [withHook(on, next), off], `${next.event} added`)
+  }
+  const old = refOf(row)
+
+  return changeHooks(
+    $,
+    row.file,
+    (on, off) => {
+      if (!hasHook(row.isOff ? off : on, old)) return GONE
+
+      return row.isOff ? [on, replaceHook(off, old, next)] : [replaceHook(on, old, next), off]
+    },
+    `${next.event} saved`,
+  )
+}
+
+const openHook = async ($: Engine, r: HookRow | null) => {
+  await update($, hookNote, () => '')
+  await update($, hookDraft, () =>
+    r
+      ? { row: r, scope: r.scope === 'project' ? ('project' as const) : ('local' as const), event: r.event, matcher: r.matcher, text: mainText(r.hook), timeout: r.hook.timeout === undefined ? '' : String(r.hook.timeout) }
+      : { row: null, scope: 'local' as const, event: 'PreToolUse', matcher: '', text: '', timeout: '' },
+  )
+}
+
 export const register: Register = on => {
   // Memory usage: reads and writes through tools (including subagents'), recalls through attachments.
   on('tool.call', { tool: 'Read' }, trackMemory)
@@ -509,6 +730,10 @@ export const register: Register = on => {
     void loadStyles($)
     const saved = await $.store.get(await missKey($))
     await update($, misses, () => (Array.isArray(saved) ? (saved as Miss[]) : []))
+    // Routing stays off until the person turns it on; the prompt check stays on until they turn it off.
+    const prefs = [await $.store.get('routing'), await $.store.get('check')]
+    await update($, routing, () => prefs[0] === true)
+    await update($, checkOn, () => prefs[1] !== false)
     await update($, hasGraph, () => false)
     if (await $.fs.exists('.codegraph')) await update($, hasGraph, () => true)
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
@@ -531,9 +756,10 @@ export const register: Register = on => {
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
     const tag = tagged(e.text)
     const now = await $.clock.now()
-    // Every new turn (yours, a notification, hook feedback) starts on Opus; only Opus delegates down.
-    await update($, turnTier, () => (tag.tier ? { tier: tag.tier, why: 'picked by you' } : { tier: 'opus', why: 'default' }))
-    if (!e.origin || e.origin.kind === 'composer' || e.origin.kind === 'bridge') {
+    // A [haiku]/[sonnet]/[opus] tag pins this turn's model; without one the turn runs on the session model.
+    await update($, turnTier, () => (tag.tier ? { tier: tag.tier, why: PINNED } : { tier: 'opus', why: 'default' }))
+    const isHuman = !e.origin || e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    if (isHuman) {
       await update($, graphSeen, () => false)
       await update($, planAsked, () => false)
       await update($, turnAt, () => now)
@@ -541,10 +767,13 @@ export const register: Register = on => {
       await update($, answers, () => ({}))
       await update($, folds, () => ({}))
       await update($, retro, () => null)
+      await update($, promptCheck, () => null)
     }
+    const previous = await read($, prompt)
     await update($, busy, () => true)
     await update($, prompt, () => tag.text)
     await update($, edited, () => [])
+    if (isHuman && (await read($, checkOn)) && worthChecking(tag.text)) void runCheck($, tag.text, previous, now)
 
     return next(tag.tier ? { ...e, text: tag.text } : e)
   })
@@ -559,6 +788,12 @@ export const register: Register = on => {
         id: 'agent-lens:delegate',
         scope: 'session' as const,
         text: `Whenever you can, delegate to a lower model through Agent with the model parameter: haiku for searches, inventories and code reading; sonnet for mechanical changes with a clear spec (renames, translations, tests following a pattern, precisely described point fixes). Keep on the current model only understanding the problem, design decisions and verifying the result. Don't delegate what you would solve in one or two tool calls. If a subagent replies "${ESCALATE} …", don't retry the task on the same model: take it over yourself or redelegate one tier up.`,
+      })
+    } else {
+      extra.push({
+        id: 'agent-lens:no-routing',
+        scope: 'session' as const,
+        text: "Model routing is off: do the work yourself, on the session model, and don't pass a model to Agent to delegate to haiku or sonnet unless the user's prompt asks for it. In the plan, mark the steps tier opus (= you).",
       })
     }
     if (await read($, planFirst)) extra.push({ id: 'agent-lens:plan', scope: 'session' as const, text: PLAN_RULE })
@@ -634,12 +869,10 @@ export const register: Register = on => {
     return text ? { ...res, context: [...(res.context ?? []), text] } : res
   })
 
-  // The main loop runs on the model chosen for this turn (Opus by default); subagents get their model decided at spawn.
+  // The main loop stays on the session model unless the prompt pinned one; subagents get their model at spawn.
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId && (await read($, routing))) {
-      const want = MODEL_IDS[(await read($, turnTier)).tier]
-      if (e.model !== want) e = { ...e, model: want }
-    }
+    const pinned = await read($, turnTier)
+    if (!e.agentId && pinned.why === PINNED && e.model !== MODEL_IDS[pinned.tier]) e = { ...e, model: MODEL_IDS[pinned.tier] }
     const id = `${e.turnId}:${e.agentId ?? 'main'}:${e.index}`
     const step: Step = {
       id,
@@ -832,15 +1065,16 @@ export const register: Register = on => {
     const lastPrompt = await read($, prompt)
     // A tab saved by an older version (Steps, Skills) falls back to Flow.
     const stored = String(await read($, tab))
-    const current: Tab = ['think', 'changes', 'workers', 'memories', 'styles'].includes(stored) ? (stored as Tab) : 'think'
+    const current: Tab = ['think', 'changes', 'memories', 'styles', 'hooks'].includes(stored) ? (stored as Tab) : 'think'
     const foldNow = await read($, folds)
     const retroNow = await read($, retro)
     const sessionModel = await $.session.model()
     const sum = await read($, totals)
     const learnedNow = await read($, misses)
     const isPlanFirst = await read($, planFirst)
+    const isChecking = await read($, checkOn)
+    const checkNow = await read($, promptCheck)
     const since = await read($, turnAt)
-    const allChecks = await read($, validations)
     const { context, rateLimits } = await $.session.usage()
     const now = await $.clock.now()
     const room = Math.max(6, (e.viewport?.rows ?? 30) - 12)
@@ -853,7 +1087,6 @@ export const register: Register = on => {
     const tokensOut = turnSteps.reduce((n, s) => n + s.tokensOut, 0)
     const cacheRead = turnSteps.reduce((n, s) => n + s.cacheRead, 0)
     const turnCost = turnSteps.reduce((n, s) => n + (s.cost ?? 0), 0)
-    const turnOpus = turnSteps.reduce((n, s) => n + (s.opusCost ?? 0), 0)
     const saved = sum.opusCost ? Math.round((1 - (sum.cost ?? 0) / sum.opusCost) * 100) : 0
     const running = allWorkers.filter(w => w.status === 'running').length
     const workerType = (agentId: string) => allWorkers.find(w => w.agentId === agentId)?.type ?? 'worker'
@@ -862,7 +1095,20 @@ export const register: Register = on => {
       <Box flexDirection="column" borderStyle="round" borderColor={C.accent} paddingX={1}>
         <Box justifyContent="space-between">
           <Text bold color={C.accent}>◆ AGENT LENS</Text>
-          <Text color={running ? C.run : C.ok}>{running ? `● ${running} worker${running > 1 ? 's' : ''}` : '○ idle'}</Text>
+          <Box gap={1}>
+            <Text color={running ? C.run : C.ok}>{running ? `● ${running} worker${running > 1 ? 's' : ''}` : '○ idle'}</Text>
+            {/* Output styles: a small icon, not a tab; pressed again it goes back to Flow. */}
+            <Button
+              key="tab-styles"
+              plain
+              label={current === 'styles' ? '[Aa]' : 'Aa'}
+              hotkey="y"
+              onPress={() => {
+                void update($, tab, () => (current === 'styles' ? 'think' : 'styles'))
+                if (current !== 'styles') void loadStyles($)
+              }}
+            />
+          </Box>
         </Box>
         <Text>
           <Text dimColor>model </Text>
@@ -873,16 +1119,17 @@ export const register: Register = on => {
         <Box justifyContent="space-between">
           <Text wrap="truncate-end">
             <Text dimColor>routing </Text>
-            {isRouting ? (
+            {isRouting ? <Text color={C.accent}>auto: delegates down</Text> : <Text dimColor>off</Text>}
+            {tierNow.why === PINNED ? (
               <Text>
+                <Text dimColor> · this turn </Text>
                 <Text bold color={TIER_COLOR[tierNow.tier]}>{tierNow.tier}</Text>
-                <Text dimColor> ({tierNow.why}) · [haiku]/[sonnet] in the prompt</Text>
               </Text>
             ) : (
-              <Text color={C.bad}>off: everything on the session model</Text>
+              <Text dimColor> · [haiku]/[sonnet] at the start pins a turn</Text>
             )}
           </Text>
-          <Button key="routing" plain label={isRouting ? '[off]' : '[on]'} hotkey="r" onPress={() => update($, routing, v => !v)} />
+          <Button key="routing" plain label={isRouting ? '[off]' : '[on]'} hotkey="r" onPress={() => void flipRouting($)} />
         </Box>
         {graphReady && (
           <Box justifyContent="space-between">
@@ -899,6 +1146,13 @@ export const register: Register = on => {
             {isPlanFirst ? <Text color={C.accent}>first in Flow: what I understand, how I act</Text> : <Text dimColor>off</Text>}
           </Text>
           <Button key="planfirst" plain label={isPlanFirst ? '[off]' : '[on]'} hotkey="n" onPress={() => update($, planFirst, v => !v)} />
+        </Box>
+        <Box justifyContent="space-between">
+          <Text wrap="truncate-end">
+            <Text dimColor>prompt check </Text>
+            {isChecking ? <Text color={C.accent}>haiku at submit: gaps + questions</Text> : <Text dimColor>off</Text>}
+          </Text>
+          <Button key="check" plain label={isChecking ? '[off]' : '[on]'} hotkey="k" onPress={() => void flipCheck($)} />
         </Box>
         {lastCheck && (
           <Text wrap="truncate-end" dimColor={lastCheck.status === 'stale'} color={lastCheck.status === 'ok' ? C.ok : lastCheck.status === 'fail' ? C.bad : lastCheck.status === 'running' ? C.run : undefined}>
@@ -921,7 +1175,7 @@ export const register: Register = on => {
           <Text dimColor> / all on opus {usd(sum.opusCost ?? 0)} </Text>
           <Text color={saved > 0 ? C.ok : undefined}>({saved > 0 ? `−${saved}` : '0'}%)</Text>
         </Text>
-        {learnedNow.length > 0 && (
+        {isRouting && learnedNow.length > 0 && (
           <Box justifyContent="space-between">
             <Text wrap="truncate-end">
               <Text dimColor>learned </Text>
@@ -955,9 +1209,8 @@ export const register: Register = on => {
           [
             ['think', 'Flow', 'f'],
             ['changes', `Git ${list.length}`, 'c'],
-            ['workers', `Workers ${allWorkers.length}`, 'w'],
             ['memories', 'Memories', 'e'],
-            ['styles', 'Style', 'y'],
+            ['hooks', 'Hooks', 'h'],
           ] as [Tab, string, string][]
         ).map(([id, label, hotkey]) => (
           <Button
@@ -969,7 +1222,7 @@ export const register: Register = on => {
               void update($, tab, () => id)
               if (id === 'changes') void refreshChanges($)
               if (id === 'memories') void loadMemories($)
-              if (id === 'styles') void loadStyles($)
+              if (id === 'hooks') void loadHooks($)
             }}
           />
         ))}
@@ -1143,6 +1396,62 @@ export const register: Register = on => {
       )
     }
 
+    // A question from the plan or the prompt check: one-click options or a typed answer, which reaches the model.
+    const questionRow = (prefix: string, q: Plan['questions'][number], i: number) => {
+      const a = answered[q.ask]
+      const isAsking = !a || a.state === 'draft'
+
+      return (
+        <Box key={`${prefix}-${i}`} flexDirection="column" marginTop={i ? 1 : 0}>
+          <Text wrap="wrap">
+            <Text color={isAsking ? C.info : C.ok}>{isAsking ? '? ' : '✓ '}</Text>
+            {q.ask}
+          </Text>
+          {q.why !== '' && <Text wrap="wrap" dimColor>{'  '}→ {q.why}</Text>}
+          {isAsking ? (
+            <Box flexDirection="column">
+              {q.fallback !== '' && <Text wrap="wrap" dimColor>{'  '}default: {q.fallback}</Text>}
+              {q.options.length > 0 && (
+                <Box gap={1} flexWrap="wrap">
+                  {q.options.map((o, oi) => (
+                    <Button key={`${prefix}-${i}-o-${oi}`} plain={oi > 0 || undefined} label={o} onPress={() => void answer($, q.ask, o)} />
+                  ))}
+                </Box>
+              )}
+              <Input
+                key={`${prefix}-${i}-in`}
+                label="  ↳ "
+                placeholder={q.options.length ? 'or write something else' : 'your answer'}
+                value={a?.text ?? ''}
+                submitLabel="send"
+                onInput={v => void update($, answers, all => ({ ...all, [q.ask]: { text: v, state: 'draft' as const } }))}
+                onSubmit={v => void answer($, q.ask, v)}
+              />
+            </Box>
+          ) : (
+            <Box gap={1}>
+              <Text wrap="wrap">
+                <Text color={a.state === 'sent' ? C.ok : C.run}>{'  '}↳ {a.text}</Text>
+                <Text dimColor>{a.state === 'sent' ? ' · read' : ' · reaches the next step'}</Text>
+              </Text>
+              {a.state === 'sent' && <Button key={`${prefix}-${i}-redo`} plain label="change" onPress={() => void update($, answers, all => ({ ...all, [q.ask]: { text: a.text, state: 'draft' as const } }))} />}
+            </Box>
+          )}
+        </Box>
+      )
+    }
+
+    // The request as it should have been written, copyable so the next prompt can start from it.
+    const betterRow = (key: string, text: string, top: number) => (
+      <Box key={key} flexDirection="column" marginTop={top}>
+        <Box justifyContent="space-between">
+          <Text dimColor>next time, write it like this:</Text>
+          <Button key={`${key}-copy`} plain label="[copy]" onPress={(press: { surface?: unknown }) => void copyText($, text, press?.surface)} />
+        </Box>
+        <Text wrap="wrap" italic>„{text}”</Text>
+      </Box>
+    )
+
     const thinkView = (
       <Box flexDirection="column" gap={1}>
         {lastPrompt !== '' && (
@@ -1151,6 +1460,31 @@ export const register: Register = on => {
             <Text italic>{lastPrompt.replace(/\s+/g, ' ')}</Text>
           </Text>
         )}
+        {checkNow &&
+          section('check', `PROMPT CHECK${checkNow.running ? ' …' : checkNow.note ? ' ✗' : ` ${checkNow.clarity}/10`}`, true, () => (
+            <Box flexDirection="column">
+              {checkNow.running && <Text color={C.run}>● haiku is reading your prompt…</Text>}
+              {checkNow.note !== '' && <Text wrap="wrap" dimColor>{checkNow.note}</Text>}
+              {!checkNow.running && checkNow.note === '' && (
+                <Box flexDirection="column">
+                  <Text>
+                    <Text dimColor>clarity </Text>
+                    <Text color={clarityColor(checkNow.clarity)}>{'▮'.repeat(checkNow.clarity)}</Text>
+                    <Text dimColor>{'▯'.repeat(10 - checkNow.clarity)} {checkNow.clarity}/10 · from the prompt alone</Text>
+                  </Text>
+                  {checkNow.missing.length === 0 && checkNow.questions.length === 0 && <Text color={C.ok}>✓ nothing important missing</Text>}
+                  {checkNow.missing.map((m, i) => (
+                    <Text key={`cm-${i}`} wrap="wrap">
+                      <Text color={C.run}>– </Text>
+                      {m}
+                    </Text>
+                  ))}
+                  {checkNow.questions.length > 0 && <Box flexDirection="column" marginTop={1}>{checkNow.questions.map((q, i) => questionRow('cq', q, i))}</Box>}
+                  {checkNow.better !== '' && betterRow('cbetter', checkNow.better, 1)}
+                </Box>
+              )}
+            </Box>
+          ))}
         {!planNow && <Text dimColor>No plan yet for this request.</Text>}
         {planNow &&
           section('goal', 'UNDERSTAND', true, () => (
@@ -1288,55 +1622,8 @@ export const register: Register = on => {
         {planNow && (planNow.questions.length > 0 || planNow.betterPrompt) && (
           <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1}>
             <Text bold color={C.info}>HOW YOU CAN HELP ME BE PRECISE</Text>
-            {planNow.questions.map((q, i) => {
-              const a = answered[q.ask]
-              const isOpen = !a || a.state === 'draft'
-
-              return (
-                <Box key={`q-${i}`} flexDirection="column" marginTop={i ? 1 : 0}>
-                  <Text wrap="wrap">
-                    <Text color={isOpen ? C.info : C.ok}>{isOpen ? '? ' : '✓ '}</Text>
-                    {q.ask}
-                  </Text>
-                  {q.why !== '' && <Text wrap="wrap" dimColor>{'  '}→ {q.why}</Text>}
-                  {isOpen ? (
-                    <Box flexDirection="column">
-                      {q.fallback !== '' && <Text wrap="wrap" dimColor>{'  '}default: {q.fallback}</Text>}
-                      {q.options.length > 0 && (
-                        <Box gap={1} flexWrap="wrap">
-                          {q.options.map((o, oi) => (
-                            <Button key={`q-${i}-o-${oi}`} plain={oi > 0 || undefined} label={o} onPress={() => void answer($, q.ask, o)} />
-                          ))}
-                        </Box>
-                      )}
-                      <Input
-                        key={`q-${i}-in`}
-                        label="  ↳ "
-                        placeholder={q.options.length ? 'or write something else' : 'your answer'}
-                        value={a?.text ?? ''}
-                        submitLabel="send"
-                        onInput={v => void update($, answers, all => ({ ...all, [q.ask]: { text: v, state: 'draft' as const } }))}
-                        onSubmit={v => void answer($, q.ask, v)}
-                      />
-                    </Box>
-                  ) : (
-                    <Box gap={1}>
-                      <Text wrap="wrap">
-                        <Text color={a.state === 'sent' ? C.ok : C.run}>{'  '}↳ {a.text}</Text>
-                        <Text dimColor>{a.state === 'sent' ? ' · read' : ' · reaches the next step'}</Text>
-                      </Text>
-                      {a.state === 'sent' && <Button key={`q-${i}-redo`} plain label="change" onPress={() => void update($, answers, all => ({ ...all, [q.ask]: { text: a.text, state: 'draft' as const } }))} />}
-                    </Box>
-                  )}
-                </Box>
-              )
-            })}
-            {planNow.betterPrompt !== '' && (
-              <Box flexDirection="column" marginTop={planNow.questions.length ? 1 : 0}>
-                <Text dimColor>next time, write it like this:</Text>
-                <Text wrap="wrap" italic>„{planNow.betterPrompt}”</Text>
-              </Box>
-            )}
+            {planNow.questions.map((q, i) => questionRow('q', q, i))}
+            {planNow.betterPrompt !== '' && betterRow('better', planNow.betterPrompt, planNow.questions.length ? 1 : 0)}
           </Box>
         )}
         {section('tools', 'TOOLS IN SESSION', false, () => (
@@ -1451,28 +1738,11 @@ export const register: Register = on => {
       </Box>
     )
 
-    const workersNow = workersView(
-      $.ui.resolve(e),
-      {
-        routing: isRouting,
-        tier: tierNow,
-        workers: allWorkers,
-        since,
-        validations: allChecks,
-        tools: Object.fromEntries(allWorkers.filter(w => w.agentId).map(w => [w.agentId, tally(allSteps.filter(s => s.agentId === w.agentId).flatMap(s => s.tools))])),
-        fold: foldNow,
-        misses: learnedNow.length,
-        cost: turnCost,
-        opusCost: turnOpus,
-      },
-      { toggle },
-    )
-
     return (
       <Box flexDirection="column" gap={1} minHeight={e.props.scroll.bodyRows}>
         {header}
         {tabs}
-        {current === 'think' ? (stepDetail || thinkView) : current === 'changes' ? (diffView || changesView) : current === 'workers' ? workersNow : current === 'styles' ? stylesView(
+        {current === 'think' ? (stepDetail || thinkView) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
                   $.ui.resolve(e),
                   { list: await read($, styles), active: await read($, styleActive), draft: await read($, styleDraft), fresh: await read($, styleFresh), note: await read($, styleNote), loaded: await read($, styleLoaded) },
                   {
@@ -1488,7 +1758,33 @@ export const register: Register = on => {
                     create: name => void createStyle($, name),
                     refresh: () => void loadStyles($),
                   },
-                ) : current === 'memories' ? memoriesView($.ui.resolve(e), { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), filter: await read($, memType), room }, { open: name => void openMemory($, name), back: () => void update($, memView, () => null), filter: t => void update($, memType, () => t), refresh: () => void loadMemories($) }) : null}
+                ) : current === 'memories' ? memoriesView($.ui.resolve(e), { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), filter: await read($, memType), audit: await read($, memAudit), now: await $.clock.now() }, { analyze: () => void analyzeMemories($), mermaid: (press: { surface?: unknown }) => void copyMermaid($, press?.surface), open: name => void openMemory($, name), back: () => void update($, memView, () => null), filter: t => void update($, memType, () => t), refresh: () => void loadMemories($) }) : current === 'hooks' ? hooksView(
+                  $.ui.resolve(e),
+                  {
+                    rows: await read($, hookRows),
+                    draft: await read($, hookDraft),
+                    note: await read($, hookNote),
+                    loaded: await read($, hooksLoaded),
+                    paths: await read($, hookPaths),
+                    lens: [
+                      { key: 'check', label: 'prompt check', on: isChecking, what: 'haiku reads each prompt at submit' },
+                      { key: 'plan', label: 'miniplan', on: isPlanFirst, what: 'a plan in Flow before the first tool' },
+                      { key: 'routing', label: 'routing', on: isRouting, what: 'auto delegation; off = only [haiku]/[sonnet] tags' },
+                      ...(graphReady ? [{ key: 'graph', label: 'codegraph first', on: isGraphFirst, what: 'codegraph_explore before Grep/Glob' }] : []),
+                    ],
+                  },
+                  {
+                    open: row => void openHook($, row),
+                    fresh: () => void openHook($, null),
+                    back: () => void update($, hookDraft, () => null),
+                    toggle: row => void toggleHook($, row),
+                    remove: row => void removeHook($, row),
+                    edit: patch => void update($, hookDraft, d => (d ? { ...d, ...patch } : d)),
+                    save: () => void saveHook($),
+                    refresh: () => void loadHooks($),
+                    lens: key => void (key === 'check' ? flipCheck($) : key === 'routing' ? flipRouting($) : key === 'plan' ? update($, planFirst, v => !v) : update($, graphFirst, v => !v)),
+                  },
+                ) : null}
         <Box flexGrow={1} />
         {current === 'changes' && gitControls}
       </Box>

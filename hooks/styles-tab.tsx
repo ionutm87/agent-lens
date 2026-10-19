@@ -60,12 +60,15 @@ export const stylesView = ({ Box, Text, Button, Input }: Ui, { list, active, dra
 
   return (
     <Box flexDirection="column">
-      <Text wrap="wrap">
-        <Text bold>{list.length}</Text>
-        <Text dimColor> styles · active: </Text>
-        <Text bold color="green">{active || 'default'}</Text>
+      {/* A Button is no inline element: inside a Text the engine refuses the whole tree. */}
+      <Box>
+        <Text wrap="wrap">
+          <Text bold>{list.length}</Text>
+          <Text dimColor> styles · active: </Text>
+          <Text bold color="green">{active || 'default'}</Text>
+        </Text>
         <Button key="st-refresh" plain label=" ↻" onPress={act.refresh} />
-      </Text>
+      </Box>
       <Text dimColor wrap="wrap">Click a style to read and edit it · “use” writes outputStyle in settings.json, read at the start of the next session.</Text>
       {status}
       <Box marginTop={1} flexDirection="column">

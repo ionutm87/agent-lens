@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { brief, pairUses, tally } from '../hooks/register'
+import { brief, pairUses } from '../hooks/register'
 
 const PANE = {
   component: 'Pane',
@@ -15,11 +15,6 @@ const PANE = {
   },
   viewport: { columns: 160, rows: 40 },
 } as const
-
-test('tally groups repeated tools', () => {
-  expect(tally(['Read', 'Read', 'Bash', 'Read'])).toBe('Read×3 Bash')
-  expect(tally([])).toBe('')
-})
 
 test('opened step: short input and the matching output from the transcript', () => {
   expect(brief({ command: 'git status', description: 'x' })).toBe('git status')
@@ -46,9 +41,11 @@ test('the sidebar renders and the tabs switch', async ($, on) => {
     expect(await ui.find({ type: 'Text', text: /opus-5-5/ })).toBeDefined()
     await ui.press({ key: 'tab-changes' })
     expect(await ui.find({ type: 'Text', text: /Not a git repository|Reading status|nothing to commit|staged/ })).toBeDefined()
-    await ui.press({ key: 'tab-workers' })
-    expect(await ui.find({ type: 'Text', text: /No subagents invoked in this session\./ })).toBeDefined()
+    await ui.press({ key: 'tab-styles' })
+    expect(await ui.find({ type: 'Text', text: /styles · active/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /42%/ })).toBeDefined()
+    await ui.press({ key: 'tab-hooks' })
+    expect(await ui.find({ type: 'Text', text: /GLOBAL/ })).toBeDefined()
     await ui.press({ key: 'tab-think' })
     expect(await ui.find({ type: 'Button', key: 'fold-exec' })).toBeDefined()
     await ui.unmount()
