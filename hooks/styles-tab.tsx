@@ -2,8 +2,6 @@ import type { Style, StyleDraft } from '../types'
 
 // Output style tab, drawing only (like memories-tab.tsx): what touches `$` lives in register.tsx.
 
-const clip = (text: string, n = 60) => (text.length > n ? `${text.slice(0, n - 1)}…` : text)
-
 export type StyleData = { list: Style[]; active: string; draft: StyleDraft | null; fresh: string; note: string; loaded: boolean }
 export type StyleActions = {
   open: (file: string) => void
@@ -72,13 +70,21 @@ export const stylesView = ({ Box, Text, Button, Input }: Ui, { list, active, dra
       <Text dimColor wrap="wrap">Click a style to read and edit it · “use” writes outputStyle in settings.json, read at the start of the next session.</Text>
       {status}
       <Box marginTop={1} flexDirection="column">
+        {/* Two lines per style: name and "use" on one, the description under it, cut at the pane's width. */}
         {list.map(s => (
-          <Box key={`st-${s.file}`}>
-            <Text color={s.name === active ? 'green' : undefined}>{s.name === active ? '● ' : '○ '}</Text>
-            <Button key={`st-open-${s.file}`} plain label={s.name} onPress={() => act.open(s.file)} />
-            <Text dimColor>  </Text>
-            <Button key={`st-desc-${s.file}`} plain label={clip(s.description)} onPress={() => act.open(s.file)} />
-            {s.name === active ? null : <Button key={`st-quick-${s.file}`} plain label="  use" onPress={() => act.use(s.file)} />}
+          <Box key={`st-${s.file}`} flexDirection="column">
+            <Box justifyContent="space-between">
+              <Box flexShrink={1} minWidth={0}>
+                <Text color={s.name === active ? 'green' : undefined}>{s.name === active ? '● ' : '○ '}</Text>
+                <Button key={`st-open-${s.file}`} plain label={s.name} onPress={() => act.open(s.file)} />
+              </Box>
+              <Box flexShrink={0} marginLeft={2}>
+                {s.name === active ? <Text color="green">in use</Text> : <Button key={`st-quick-${s.file}`} plain label="use" onPress={() => act.use(s.file)} />}
+              </Box>
+            </Box>
+            <Box marginLeft={2}>
+              <Text dimColor wrap="truncate-end">{s.description}</Text>
+            </Box>
           </Box>
         ))}
       </Box>
