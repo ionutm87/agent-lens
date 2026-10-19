@@ -56,9 +56,36 @@ export const isolated = (list: readonly Pick<Memory, 'name' | 'links'>[]) => {
   return list.filter(m => m.links.length === 0 && !back[m.name]?.length).map(m => m.name)
 }
 
+// What a memory names in the code, from its backtick spans: a path (`lib/x/y.ex`, `docs/specs/`), a dotted module or
+// function (`Billing.Proration`, `Recurring.MonthlyCost.build/2`) or a snake/Camel identifier (`price_cents`, `MF_BANK`).
+// Prose, commands with spaces and short words are skipped. Checked in the repo at analyze time: a reference that is
+// gone is hard evidence the memory went stale.
+export type Ref = { ref: string; kind: 'path' | 'symbol'; needle: string }
+
+export const refsOf = (body: string): Ref[] => {
+  const out = new Map<string, Ref>()
+  for (const m of body.matchAll(/`([^`\n]{3,80})`/g)) {
+    const ref = (m[1] ?? '').trim()
+    if (/\s/.test(ref) || /^[-$]/.test(ref) || ref.includes('..')) continue
+    if (/^[\w.@-]+(\/[\w.@-]+)+\/?$/.test(ref) && !/\/\d+$/.test(ref)) {
+      out.set(ref, { ref, kind: 'path', needle: ref.replace(/\/$/, '') })
+      continue
+    }
+    // `Mod.Sub.fun/2` → its most specific segment (the longest); `snake_case` / `CamelCase` → itself. A miss is what matters.
+    const name = ref.replace(/\/\d+$/, '').replace(/\(.*\)$/, '')
+    if (!/^[A-Za-z][\w.]*$/.test(name)) continue
+    const needle = name.split('.').filter(Boolean).sort((a, b) => b.length - a.length)[0] ?? ''
+    if (needle.length < 4 || !(/_/.test(needle) || /[a-z][A-Z]|[A-Z][a-z]+[A-Z]/.test(needle) || name.includes('.'))) continue
+    out.set(ref, { ref, kind: 'symbol', needle })
+  }
+
+  return [...out.values()].slice(0, 12)
+}
+
 // The "analyze" verdict on one memory, against the open project: does it still help the model here?
+// `fix` = the body rewritten with what no longer holds dropped or corrected (stale only); `gone` = references not in the code.
 export const VERDICTS = ['relevant', 'stale', 'irrelevant'] as const
-export type Verdict = { verdict: (typeof VERDICTS)[number]; why: string }
+export type Verdict = { verdict: (typeof VERDICTS)[number]; why: string; fix?: string; gone?: string[] }
 
 // The model's reply → verdicts by name. It answers a JSON array; anything around it (a fence, a sentence) is ignored,
 // and only names that exist with a known verdict are kept.
@@ -75,11 +102,27 @@ export const parseVerdicts = (text: string, names: readonly string[]) => {
   for (const r of rows as { name?: unknown; verdict?: unknown; why?: unknown }[]) {
     const name = String(r?.name ?? '')
     const verdict = String(r?.verdict ?? '') as Verdict['verdict']
-    if (names.includes(name) && VERDICTS.includes(verdict)) out[name] = { verdict, why: String(r?.why ?? '').trim() }
+    if (!names.includes(name) || !VERDICTS.includes(verdict)) continue
+    const fix = typeof r?.fix === 'string' ? r.fix.trim() : ''
+    out[name] = { verdict, why: String(r?.why ?? '').trim(), ...(verdict === 'stale' && fix ? { fix } : {}) }
   }
 
   return out
 }
+
+// The memory file with its body replaced and the frontmatter kept as it was.
+export const withBody = (text: string, body: string) => {
+  const m = text.match(/^---\n[\s\S]*?\n---\n?/)
+
+  return `${m ? m[0] : ''}\n${body.trim()}\n`
+}
+
+// MEMORY.md without the line that points at this file.
+export const withoutIndexLine = (text: string, file: string) =>
+  text
+    .split('\n')
+    .filter(l => !new RegExp(`^\\s*-\\s*\\[[^\\]]*\\]\\(${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`).test(l))
+    .join('\n')
 
 // The graph as Mermaid source, to paste in any viewer (GitHub, mermaid.live): one class per type, a missing target dashed.
 export const toMermaid = (list: readonly Pick<Memory, 'name' | 'type' | 'links'>[], verdicts: Record<string, Verdict> = {}) => {

@@ -12,7 +12,8 @@ import { hasHook, hookFromDraft, mainText, offFile, parseSettings, replaceHook, 
 import type { HookRef, Settings } from './settings-hooks'
 import { activeStyle, buildStyle, parseStyle, slugName, withOutputStyle } from './styles'
 import { retroMessage, retroOf } from './retro'
-import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, toMermaid } from './memories'
+import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, refsOf, toMermaid, withBody, withoutIndexLine } from './memories'
+import type { Ref } from './memories'
 import { ESCALATE, ESCALATE_RULE, MODEL_IDS, VALIDATOR, VALIDATOR_PROMPT, addMiss, costOf, escalationOf, learned, tagged, tierOf, verdictOf, wordsOf } from './router'
 import type { Tier } from './router'
 
@@ -420,9 +421,36 @@ const createStyle = async ($: Engine, name: string) => {
   }
 }
 
-// The "analyze" button: Sonnet reads every memory next to the project's CLAUDE.md and recent commits and says, per
-// memory, whether it still helps here. It only marks; nothing is deleted. Kept per project in $.store.
+// The "analyze" button. First the code: every path or symbol a memory names in backticks is looked up in the repo
+// (tracked contents and file names), and what is gone becomes hard evidence. Then Sonnet reads each memory with that
+// evidence, the project's CLAUDE.md and recent commits, and says whether it still helps here, with the body rewritten
+// for a stale one. It only marks; "fix" and "delete" are clicks. Kept per project in $.store.
 const auditKey = async ($: Engine) => `memaudit:${await $.session.root()}`
+
+// ponytail: git grep on tracked files + file names; untracked work is invisible, a false "gone" reads as a hint, not a verdict
+const isInRepo = async ($: Engine, root: string, r: Ref) => {
+  if (r.kind === 'path') return $.fs.exists(`${root}/${r.needle}`)
+  const res = await $.process.run(['sh', '-c', 'git -C "$1" grep -q -I -F -- "$2" || [ -n "$(git -C "$1" ls-files -- "*$2*")" ]', 'sh', root, r.needle], { timeoutMs: 10_000 }).catch(() => null)
+
+  return res?.exitCode === 0
+}
+
+const checkRefs = async ($: Engine, root: string, list: Memory[], dir: string) => {
+  const texts: Record<string, string> = {}
+  const gone: Record<string, string[]> = {}
+  const seen = new Map<string, boolean>()
+  const isGit = (await git($, root, ['rev-parse', '--show-toplevel']).catch(() => ({ exitCode: 1 }))).exitCode === 0
+  for (const m of list) {
+    texts[m.name] = await $.fs.read(`${dir}/${m.file}`).catch(() => '')
+    if (!isGit) continue
+    for (const r of refsOf(parseMemory(m.file, texts[m.name] ?? '').body)) {
+      if (!seen.has(r.ref)) seen.set(r.ref, await isInRepo($, root, r))
+      if (!seen.get(r.ref)) (gone[m.name] ??= []).push(r.ref)
+    }
+  }
+
+  return { texts, gone, checked: seen.size, isGit }
+}
 
 const analyzeMemories = async ($: Engine) => {
   const list = await read($, memories)
@@ -433,20 +461,24 @@ const analyzeMemories = async ($: Engine) => {
     const root = await $.session.root()
     const now = await $.clock.now()
     const day = (ms: number) => new Date(ms).toISOString().slice(0, 10)
-    const notes: string[] = []
-    for (const m of list) notes.push(`### ${m.name} (type ${m.type}, changed ${day(m.mtimeMs)})\n${clip(await $.fs.read(`${dir}/${m.file}`).catch(() => ''), 1500)}`)
+    const { texts, gone, checked, isGit } = await checkRefs($, root, list, dir)
+    const notes = list.map(m => {
+      const evidence = gone[m.name]?.length ? `CODE CHECK: not in the repo any more: ${gone[m.name]!.map(r => `\`${r}\``).join(', ')}` : isGit ? 'CODE CHECK: every path and symbol it names still exists' : ''
+      return `### ${m.name} (type ${m.type}, changed ${day(m.mtimeMs)})\n${evidence}\n${clip(parseMemory(m.file, texts[m.name] ?? '').body, 2500)}`
+    })
     const guide = await $.fs.read(`${root}/CLAUDE.md`).catch(() => '')
     const log = await git($, root, ['log', '-25', '--format=%as %s']).catch(() => ({ stdout: '' }))
     const res = await $.model.complete({
       model: 'sonnet',
-      maxTokens: 4000,
-      timeoutMs: 120_000,
-      prompt: `You audit the persistent memory an AI coding agent keeps for one project. For EACH memory decide:
+      maxTokens: 12_000,
+      timeoutMs: 240_000,
+      prompt: `You audit the persistent memory an AI coding agent keeps for one project. Each memory comes with a CODE CHECK: the paths and symbols it names that the repository no longer has (hard evidence: something was removed or renamed). For EACH memory decide:
 - relevant: still true and useful when working on this project
-- stale: about this project, but done, outdated, contradicted by the guide or the recent commits, or its dates have passed
-- irrelevant: not about this project, or of no use to the agent here
+- stale: about this project, but partly done, outdated, contradicted by the guide, the commits or the code check, or its dates have passed
+- irrelevant: not about this project, of no use to the agent here, or entirely about things that no longer exist
 Today is ${day(now)}. Project root: ${root}.
-Answer ONLY a JSON array, one entry per memory: [{"name": "<exact name>", "verdict": "relevant" | "stale" | "irrelevant", "why": "<at most 14 words, same language as the memories>"}]
+For a stale memory also write "fix": its body rewritten in Markdown, same language, with what no longer holds removed or corrected and what still holds kept (the **Why:** / **How to apply:** lines, the [[links]]); shorter is better. Leave "fix" empty for relevant and irrelevant.
+Answer ONLY a JSON array, one entry per memory: [{"name": "<exact name>", "verdict": "relevant" | "stale" | "irrelevant", "why": "<at most 14 words, same language as the memories>", "fix": "<rewritten body or empty>"}]
 
 Project guide (CLAUDE.md, start):
 ${clip(guide, 5000) || '(none)'}
@@ -458,13 +490,63 @@ Memories:
 ${notes.join('\n\n')}`,
     })
     const verdicts = res.isAnswered ? parseVerdicts(res.text, list.map(m => m.name)) : {}
+    for (const [name, v] of Object.entries(verdicts)) if (gone[name]?.length) v.gone = gone[name]
     const n = Object.keys(verdicts).length
     if (!n) return void (await update($, memAudit, a => ({ ...a, running: false, note: `✗ Sonnet gave no usable verdict${res.isAnswered ? '' : ` (${res.reason})`}` })))
-    await update($, memAudit, () => ({ at: now, running: false, note: n < list.length ? `${list.length - n} memories got no verdict` : '', verdicts }))
+    const note = [n < list.length ? `${list.length - n} memories got no verdict` : '', isGit ? `${checked} code references checked` : 'not a git repository: no code check'].filter(Boolean).join(' · ')
+    await update($, memAudit, () => ({ at: now, running: false, note, verdicts }))
     await $.store.set(await auditKey($), { at: now, verdicts })
   } catch (err) {
     await update($, memAudit, a => ({ ...a, running: false, note: `✗ analysis failed: ${(err as Error).message}` }))
   }
+}
+
+const dropVerdict = async ($: Engine, names: string[]) => {
+  await update($, memAudit, a => {
+    const verdicts = { ...a.verdicts }
+    for (const n of names) delete verdicts[n]
+    return { ...a, verdicts }
+  })
+  const a = await read($, memAudit)
+  await $.store.set(await auditKey($), { at: a.at, verdicts: a.verdicts })
+}
+
+// "delete": the file goes, and its line in MEMORY.md with it. Links from other memories stay and show as missing.
+const deleteMemories = async ($: Engine, names: string[]) => {
+  const { dir } = await read($, memMeta)
+  const list = (await read($, memories)).filter(m => names.includes(m.name))
+  if (!dir || !list.length) return
+  try {
+    const res = await $.process.run(['rm', '-f', '--', ...list.map(m => `${dir}/${m.file}`)])
+    if (res.exitCode !== 0) throw new Error(res.stderr.trim() || `rm exited ${res.exitCode}`)
+    const index = `${dir}/${INDEX}`
+    if (await $.fs.exists(index)) await $.fs.write(index, list.reduce((t, m) => withoutIndexLine(t, m.file), await $.fs.read(index)))
+    await dropVerdict($, names)
+    await update($, memView, v => (v && names.includes(v.name) ? null : v))
+    $.ui.toast(`Deleted ${list.length === 1 ? list[0]!.name : `${list.length} memories`}`)
+  } catch (err) {
+    await update($, memAudit, a => ({ ...a, note: `✗ not deleted: ${(err as Error).message}` }))
+  }
+  await loadMemories($)
+}
+
+// "fix": Sonnet's rewrite replaces the body; the frontmatter stays. The memory then counts as relevant.
+const fixMemory = async ($: Engine, name: string) => {
+  const { dir } = await read($, memMeta)
+  const m = (await read($, memories)).find(x => x.name === name)
+  const fix = (await read($, memAudit)).verdicts[name]?.fix
+  if (!dir || !m || !fix) return
+  try {
+    await $.fs.write(`${dir}/${m.file}`, withBody(await $.fs.read(`${dir}/${m.file}`), fix))
+    await update($, memAudit, a => ({ ...a, verdicts: { ...a.verdicts, [name]: { verdict: 'relevant', why: 'rewritten by the fix' } } }))
+    const a = await read($, memAudit)
+    await $.store.set(await auditKey($), { at: a.at, verdicts: a.verdicts })
+    await update($, memView, v => (v?.name === name ? { name, body: clip(fix, 6000) } : v))
+    $.ui.toast(`${name} rewritten`)
+  } catch (err) {
+    await update($, memAudit, a => ({ ...a, note: `✗ not rewritten: ${(err as Error).message}` }))
+  }
+  await loadMemories($)
 }
 
 const copyMermaid = async ($: Engine, surface: any) => {
@@ -1758,7 +1840,7 @@ export const register: Register = on => {
                     create: name => void createStyle($, name),
                     refresh: () => void loadStyles($),
                   },
-                ) : current === 'memories' ? memoriesView($.ui.resolve(e), { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), filter: await read($, memType), audit: await read($, memAudit), now: await $.clock.now() }, { analyze: () => void analyzeMemories($), mermaid: (press: { surface?: unknown }) => void copyMermaid($, press?.surface), open: name => void openMemory($, name), back: () => void update($, memView, () => null), filter: t => void update($, memType, () => t), refresh: () => void loadMemories($) }) : current === 'hooks' ? hooksView(
+                ) : current === 'memories' ? memoriesView($.ui.resolve(e), { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), filter: await read($, memType), audit: await read($, memAudit), now: await $.clock.now() }, { analyze: () => void analyzeMemories($), mermaid: (press: { surface?: unknown }) => void copyMermaid($, press?.surface), open: name => void openMemory($, name), back: () => void update($, memView, () => null), filter: t => void update($, memType, () => t), refresh: () => void loadMemories($), fix: name => void fixMemory($, name), remove: names => void deleteMemories($, names) }) : current === 'hooks' ? hooksView(
                   $.ui.resolve(e),
                   {
                     rows: await read($, hookRows),

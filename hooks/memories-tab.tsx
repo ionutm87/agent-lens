@@ -29,7 +29,7 @@ const tail = (path: string) => path.split('/').slice(-2).join('/')
 const clip = (text: string, n = 70) => (text.length > n ? `${text.slice(0, n - 1)}…` : text)
 
 export type MemoryData = { list: Memory[]; meta: MemoryMeta; use: Record<string, MemoryUse>; opened: MemoryView | null; filter: string; audit: MemoryAudit; now: number }
-export type MemoryActions = { open: (name: string) => void; back: () => void; filter: (type: string) => void; refresh: () => void; analyze: () => void; mermaid: (press: any) => void }
+export type MemoryActions = { open: (name: string) => void; back: () => void; filter: (type: string) => void; refresh: () => void; analyze: () => void; mermaid: (press: any) => void; fix: (name: string) => void; remove: (names: string[]) => void }
 type Ui = { Box: any; Text: any; Button: any; Markdown: any } // ponytail: terminal elements, untyped here; register.tsx provides them from $.ui.resolve
 
 export const memoriesView = ({ Box, Text, Button, Markdown }: Ui, { list, meta, use, opened, filter, audit, now }: MemoryData, act: MemoryActions) => {
@@ -78,6 +78,19 @@ export const memoriesView = ({ Box, Text, Button, Markdown }: Ui, { list, meta, 
             <Text color={VERDICT[audit.verdicts[node.name]!.verdict].color}>{VERDICT[audit.verdicts[node.name]!.verdict].mark} {audit.verdicts[node.name]!.verdict}</Text>
             <Text dimColor> · {audit.verdicts[node.name]!.why}</Text>
           </Text>
+        ) : null}
+        {audit.verdicts[node.name]?.gone?.length ? <Text wrap="wrap" color="red">gone from the code: {audit.verdicts[node.name]!.gone!.map(r => `\`${r}\``).join(', ')}</Text> : null}
+        {audit.verdicts[node.name] && audit.verdicts[node.name]!.verdict !== 'relevant' ? (
+          <Box gap={1} marginTop={1}>
+            {audit.verdicts[node.name]!.fix ? <Button key={`mem-fix-${node.name}`} variant="primary" label="apply the fix" onPress={() => act.fix(node.name)} /> : null}
+            <Button key={`mem-del-${node.name}`} label="delete" onPress={() => act.remove([node.name])} />
+          </Box>
+        ) : null}
+        {audit.verdicts[node.name]?.fix ? (
+          <Box flexDirection="column" marginTop={1} borderStyle="round" borderColor="yellow" paddingX={1}>
+            <Text bold color="yellow">PROPOSED FIX · replaces the body, keeps the frontmatter</Text>
+            <Markdown text={audit.verdicts[node.name]!.fix!} />
+          </Box>
         ) : null}
         <Text wrap="wrap">
           <Text dimColor>in prompt (MEMORY.md): </Text>
@@ -136,6 +149,15 @@ export const memoriesView = ({ Box, Text, Button, Markdown }: Ui, { list, meta, 
           {'   '}
           {flagged ? verdict.why : clip(m.description || m.hook, 90)}
         </Text>
+        {verdict?.gone?.length ? <Text wrap="truncate-end" color="red">{'   '}gone: {verdict.gone.map(r => `\`${r}\``).join(' ')}</Text> : null}
+        {flagged && (
+          <Box>
+            <Text>{'   '}</Text>
+            {verdict.fix ? <Button key={`mf-${m.name}`} plain label="[fix]" onPress={() => act.fix(m.name)} /> : null}
+            {verdict.fix ? <Text> </Text> : null}
+            <Button key={`md-${m.name}`} plain label="[delete]" onPress={() => act.remove([m.name])} />
+          </Box>
+        )}
         {m.links.map((to, i) => (
           <Box key={`edge-${m.name}-${to}`}>
             <Text dimColor>{i === m.links.length - 1 ? '   └→ ' : '   ├→ '}</Text>
@@ -169,16 +191,19 @@ export const memoriesView = ({ Box, Text, Button, Markdown }: Ui, { list, meta, 
         </Box>
       </Box>
       {audit.running ? (
-        <Text color="yellow">● Sonnet is reading {list.length} memories against CLAUDE.md and the recent commits…</Text>
+        <Text color="yellow">● checking {list.length} memories against the code, then Sonnet reads them with CLAUDE.md and the recent commits…</Text>
       ) : analyzed ? (
-        <Text wrap="truncate-end">
-          <Text dimColor>relevance {ago(now - audit.at)} ago: </Text>
-          <Text color="green">✓ {counts.relevant} relevant</Text>
-          <Text color="yellow">  ◐ {counts.stale} stale</Text>
-          <Text color="red">  ✗ {counts.irrelevant} irrelevant</Text>
-        </Text>
+        <Box justifyContent="space-between">
+          <Text wrap="truncate-end">
+            <Text dimColor>relevance {ago(now - audit.at)} ago: </Text>
+            <Text color="green">✓ {counts.relevant} relevant</Text>
+            <Text color="yellow">  ◐ {counts.stale} stale</Text>
+            <Text color="red">  ✗ {counts.irrelevant} irrelevant</Text>
+          </Text>
+          {counts.irrelevant > 0 && <Button key="mem-del-irrelevant" plain label={`[delete ✗ ${counts.irrelevant}]`} onPress={() => act.remove(list.filter(m => v(m.name)?.verdict === 'irrelevant').map(m => m.name))} />}
+        </Box>
       ) : (
-        <Text dimColor wrap="wrap">Not analyzed yet: “analyze” asks Sonnet which memories still matter for this project. It only marks, nothing is deleted.</Text>
+        <Text dimColor wrap="wrap">Not analyzed yet: “analyze” checks what each memory names in the code, then asks Sonnet which still matter here and how to rewrite the stale ones. It only marks; fix and delete are clicks.</Text>
       )}
       {audit.note ? <Text wrap="wrap" color={audit.note.startsWith('✗') ? 'red' : 'yellow'}>{audit.note}</Text> : null}
 
@@ -190,7 +215,7 @@ export const memoriesView = ({ Box, Text, Button, Markdown }: Ui, { list, meta, 
           <Button key={`mt-v-${x}`} label={`${VERDICT[x].mark} ${x} ${counts[x]}`} variant={filter === `v:${x}` ? 'primary' : 'secondary'} onPress={() => act.filter(`v:${x}`)} />
         ))}
       </Box>
-      <Text dimColor wrap="wrap">├→ links to · ←n cited by · ✓ relevant ◐ stale ✗ irrelevant · ◉ read ↺ recalled ✎ written this session</Text>
+      <Text dimColor wrap="wrap">├→ links to · ←n cited by · ✓ relevant ◐ stale ✗ irrelevant · gone: not in the code any more · ◉ read ↺ recalled ✎ written</Text>
 
       {types.map(t => {
         const group = list.filter(m => m.type === t && pass(m)).sort(order)

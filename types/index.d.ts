@@ -104,7 +104,8 @@ export type MemoryMeta = {
 export type MemoryView = { name: string; body: string }
 
 // The last "analyze" run: a verdict per memory name (relevant / stale / irrelevant, with the why), kept per project.
-export type MemoryAudit = { at: number; running: boolean; note: string; verdicts: Record<string, { verdict: 'relevant' | 'stale' | 'irrelevant'; why: string }> }
+// fix: the body rewritten for a stale memory (applied on click); gone: references the code no longer has.
+export type MemoryAudit = { at: number; running: boolean; note: string; verdicts: Record<string, { verdict: 'relevant' | 'stale' | 'irrelevant'; why: string; fix?: string; gone?: string[] }> }
 
 // Output styles: Markdown files in <config>/output-styles/. The draft is the one being edited, line by line.
 export type Style = { file: string; name: string; description: string; keep: boolean; body: string }

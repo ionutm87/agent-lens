@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { backlinks, isolated, namesIn, parseIndex, parseMemory, projectSlug, parseVerdicts, toMermaid } from '../hooks/memories'
+import { backlinks, isolated, namesIn, parseIndex, parseMemory, projectSlug, parseVerdicts, refsOf, toMermaid, withBody, withoutIndexLine } from '../hooks/memories'
 import '../hooks/register'
 
 test('project slug: same as the engine, only the open project memory', () => {
@@ -46,7 +46,7 @@ const PANE = {
 test('Memories tab: the graph, the index in context and memory neighbors', async ($, on) => {
   const files: Record<string, string> = {
     '/m/MEMORY.md': '- [A](a.md) — cârligul lui a\n',
-    '/m/a.md': '---\nname: a\ndescription: prima\nmetadata:\n  type: feedback\n---\nVezi [[b]] și [[lipsa]].',
+    '/m/a.md': '---\nname: a\ndescription: prima\nmetadata:\n  type: feedback\n---\nVezi [[b]] și [[lipsa]], `Mod.Gone` s-a dus.',
     '/m/b.md': '---\nname: b\ndescription: a doua\nmetadata:\n  type: project\n---\nNimic.',
   }
   on('session.model', () => ({ value: 'claude-opus-5-5' }))
@@ -63,7 +63,18 @@ test('Memories tab: the graph, the index in context and memory neighbors', async
     value: e.path === '/m' ? Object.keys(files).map(f => ({ name: f.slice(3), kind: 'file' as const, size: files[f]?.length ?? 0, mtimeMs: 0, isLink: false })) : [],
   }))
   on('fs.read', ($, e) => ({ value: files[e.path] ?? '' }))
-  on('model.complete', () => ({ value: { isAnswered: true, text: '[{"name":"a","verdict":"stale","why":"livrat deja"},{"name":"b","verdict":"relevant","why":"ok"}]' } }) as never)
+  on('fs.exists', ($, e) => ({ value: e.path in files }))
+  on('fs.write', ($, e) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('process.run', ($, e) => {
+    if (e.argv[0] === 'rm') for (const p of e.argv.slice(3)) delete files[p]
+    // git rev-parse succeeds (a repo); the symbol lookup finds `Gone` nowhere.
+    const isLookup = e.argv[0] === 'sh' && e.argv.includes('Gone')
+    return { value: { exitCode: isLookup ? 1 : 0, stdout: '', stderr: '' } }
+  })
+  on('model.complete', () => ({ value: { isAnswered: true, text: '[{"name":"a","verdict":"stale","why":"livrat deja","fix":"Doar [[b]] rămâne."},{"name":"b","verdict":"irrelevant","why":"alt proiect"}]' } }) as never)
 
   const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   await ui.press({ key: 'tab-memories' })
@@ -79,18 +90,47 @@ test('Memories tab: the graph, the index in context and memory neighbors', async
   await ui.press({ key: 'mem-analyze' })
   expect(await ui.find({ type: 'Text', text: /◐ 1 stale/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /livrat deja/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /gone: `Mod\.Gone`/ })).toBeDefined()
   await ui.press({ key: 'mo-a' })
   expect(await ui.find({ type: 'Text', text: /cârligul lui a/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /lipsa \(does not exist yet\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /PROPOSED FIX/ })).toBeDefined()
+  // "apply the fix": the body is replaced, the frontmatter kept, the verdict turns relevant.
+  await ui.press({ key: 'mem-fix-a' })
+  expect(files['/m/a.md']).toBe('---\nname: a\ndescription: prima\nmetadata:\n  type: feedback\n---\n\nDoar [[b]] rămâne.\n')
+  expect(await ui.find({ type: 'Text', text: /rewritten by the fix/ })).toBeDefined()
   await ui.press({ key: 'go-out-b' })
   expect(await ui.find({ type: 'Text', text: /missing from the index/ })).toBeDefined()
+  // "delete" on the irrelevant one: file gone, the index untouched by it (b was never in it).
+  await ui.press({ key: 'mem-del-b' })
+  expect('/m/b.md' in files).toBe(false)
+  expect(files['/m/MEMORY.md']).toBe('- [A](a.md) — cârligul lui a\n')
+  expect(await ui.find({ type: 'Text', text: /IN THE PROMPT/ })).toBeDefined()
   await ui.unmount()
 })
 
-test('analyze: verdicts are read from the JSON array, unknown names and verdicts dropped', () => {
-  const text = 'Here:\n```json\n[{"name":"a","verdict":"stale","why":" done in M2 "},{"name":"ghost","verdict":"relevant"},{"name":"b","verdict":"maybe"}]\n```'
-  expect(parseVerdicts(text, ['a', 'b'])).toEqual({ a: { verdict: 'stale', why: 'done in M2' } })
+test('analyze: verdicts are read from the JSON array, unknown names and verdicts dropped, fix only on stale', () => {
+  const text = 'Here:\n```json\n[{"name":"a","verdict":"stale","why":" done in M2 ","fix":" new body "},{"name":"ghost","verdict":"relevant"},{"name":"b","verdict":"maybe"},{"name":"c","verdict":"relevant","fix":"ignored"}]\n```'
+  expect(parseVerdicts(text, ['a', 'b', 'c'])).toEqual({ a: { verdict: 'stale', why: 'done in M2', fix: 'new body' }, c: { verdict: 'relevant', why: '' } })
   expect(parseVerdicts('no json here', ['a'])).toEqual({})
+})
+
+test('code references: paths and symbols from backticks, prose and commands skipped', () => {
+  const body = 'See `lib/moneyflip/billing/proration.ex` and `docs/specs/`; `Billing.Proration` deleted, `Recurring.MonthlyCost.build/2`, `price_cents`, `MF_BANK`, `mix test`, `o să vedem`, `ok`, `-x`, `Foo`.'
+  expect(refsOf(body)).toEqual([
+    { ref: 'lib/moneyflip/billing/proration.ex', kind: 'path', needle: 'lib/moneyflip/billing/proration.ex' },
+    { ref: 'docs/specs/', kind: 'path', needle: 'docs/specs' },
+    { ref: 'Billing.Proration', kind: 'symbol', needle: 'Proration' },
+    { ref: 'Recurring.MonthlyCost.build/2', kind: 'symbol', needle: 'MonthlyCost' },
+    { ref: 'price_cents', kind: 'symbol', needle: 'price_cents' },
+    { ref: 'MF_BANK', kind: 'symbol', needle: 'MF_BANK' },
+  ])
+})
+
+test('fix keeps the frontmatter; delete drops the index line only', () => {
+  expect(withBody('---\nname: a\n---\n\nold\n', 'new\nbody')).toBe('---\nname: a\n---\n\nnew\nbody\n')
+  expect(withBody('no front', 'x')).toBe('\nx\n')
+  expect(withoutIndexLine('- [A](a.md) — a\n- [AB](a-b.md) — ab\n', 'a.md')).toBe('- [AB](a-b.md) — ab\n')
 })
 
 test('mermaid: one node per memory, a missing target dashed, the verdict on the label', () => {
