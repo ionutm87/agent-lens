@@ -1,11 +1,13 @@
 import type { HookDraft, HookPaths, HookRow } from '../types'
 import { EVENTS, hookLabel, mainKey, mainText } from './settings-hooks'
+import { card, section } from './kit'
+import type { Fold } from './kit'
 
 // Hooks tab, drawing only (like styles-tab.tsx): what touches `$` lives in register.tsx.
 // Global hooks only turn on/off; the project's take any change. "Off" = parked in a *.hooks-off.json beside the file.
 
 export type LensSwitch = { key: string; label: string; on: boolean; what: string }
-export type HookData = { rows: HookRow[]; draft: HookDraft | null; note: string; loaded: boolean; paths: HookPaths; lens: LensSwitch[] }
+export type HookData = { rows: HookRow[]; draft: HookDraft | null; note: string; loaded: boolean; paths: HookPaths; lens: LensSwitch[]; fold: Fold }
 export type HookActions = {
   open: (row: HookRow) => void
   fresh: () => void
@@ -21,7 +23,8 @@ type Ui = { Box: any; Text: any; Button: any; Input: any; Select: any } // ponyt
 
 const WHERE = { global: 'global settings', project: '.claude/settings.json · shared', local: '.claude/settings.local.json · just you' } as const
 
-export const hooksView = ({ Box, Text, Button, Input, Select }: Ui, { rows, draft, note, loaded, paths, lens }: HookData, act: HookActions) => {
+export const hooksView = (ui: Ui, { rows, draft, note, loaded, paths, lens, fold }: HookData, act: HookActions) => {
+  const { Box, Text, Button, Input, Select } = ui
   if (!loaded) return <Text dimColor>Reading the hooks…</Text>
 
   const status = note ? <Text wrap="wrap" color={note.startsWith('✗') ? 'red' : 'green'}>{note}</Text> : null
@@ -90,33 +93,77 @@ export const hooksView = ({ Box, Text, Button, Input, Select }: Ui, { rows, draf
   )
   const global = rows.filter(r => r.scope === 'global')
   const project = rows.filter(r => r.scope !== 'global')
+  const on = rows.filter(r => !r.isOff).length
 
   return (
-    <Box flexDirection="column">
-      <Text bold>AGENT LENS <Text dimColor>· this mod's own hooks</Text></Text>
-      {lens.map(s => (
-        <Box key={`hl-${s.key}`}>
-          <Text color={s.on ? 'green' : undefined} dimColor={!s.on}>{s.on ? '● ' : '○ '}{s.label}</Text>
-          <Text dimColor wrap="truncate-end">  {s.what}</Text>
-          <Button key={`hl-${s.key}-toggle`} plain label={s.on ? ' off' : ' on'} onPress={() => act.lens(s.key)} />
-        </Box>
-      ))}
-      <Box marginTop={1} justifyContent="space-between">
-        <Text bold>GLOBAL <Text dimColor>· on/off only</Text></Text>
-        <Button key="hk-refresh" plain label="↻" onPress={act.refresh} />
-      </Box>
-      <Text dimColor wrap="truncate-start">{paths.global || '—'}</Text>
-      {global.length === 0 && <Text dimColor>no hooks</Text>}
-      {global.map(r => row(r))}
-      <Box marginTop={1} justifyContent="space-between">
-        <Text bold>PROJECT <Text dimColor>· add, edit, delete</Text></Text>
-        {paths.project !== '' && <Button key="hk-new" plain label="+ new" hotkey="a" onPress={act.fresh} />}
-      </Box>
-      <Text dimColor wrap="truncate-start">{paths.project ? paths.project.replace(/settings\.json$/, 'settings{,.local}.json') : 'no project folder in this session'}</Text>
-      {paths.project !== '' && project.length === 0 && <Text dimColor>no hooks · “+ new” writes to .claude/settings.local.json</Text>}
-      {project.map(r => row(r))}
-      {status}
-      <Text dimColor wrap="wrap">Claude Code reads hooks when a session starts: a change applies from the next one (or after review in /hooks). Off = moved to *.hooks-off.json beside the file. Plugin hooks are not listed.</Text>
+    <Box flexDirection="column" gap={1}>
+      {card(
+        ui,
+        'green',
+        <>
+          <Box justifyContent="space-between">
+            <Text wrap="truncate-end">
+              <Text bold>{rows.length}</Text>
+              <Text dimColor> hooks · </Text>
+              <Text color="green">● {on} on</Text>
+              <Text dimColor> · ○ {rows.length - on} off</Text>
+            </Text>
+            <Button key="hk-refresh" plain label="↻" onPress={act.refresh} />
+          </Box>
+          <Text dimColor wrap="wrap">Claude Code reads hooks when a session starts: a change applies from the next one (or after review in /hooks). Off = parked in *.hooks-off.json beside the file.</Text>
+          {status}
+        </>,
+      )}
+      {section(
+        ui,
+        fold,
+        'hk-lens',
+        "Agent Lens · this mod's switches",
+        true,
+        () => (
+          <Box flexDirection="column">
+            {lens.map(s => (
+              <Box key={`hl-${s.key}`}>
+                <Text color={s.on ? 'green' : undefined} dimColor={!s.on}>{s.on ? '● ' : '○ '}{s.label}</Text>
+                <Text dimColor wrap="truncate-end">  {s.what}</Text>
+                <Button key={`hl-${s.key}-toggle`} plain label={s.on ? ' off' : ' on'} onPress={() => act.lens(s.key)} />
+              </Box>
+            ))}
+          </Box>
+        ),
+        <Text dimColor>{lens.filter(s => s.on).length}/{lens.length} on</Text>,
+      )}
+      {section(
+        ui,
+        fold,
+        'hk-global',
+        'Global · on/off only',
+        true,
+        () => (
+          <Box flexDirection="column">
+            <Text dimColor wrap="truncate-start">{paths.global || '—'}</Text>
+            {global.length === 0 && <Text dimColor>no hooks</Text>}
+            {global.map(r => row(r))}
+          </Box>
+        ),
+        <Text dimColor>{global.length}</Text>,
+      )}
+      {section(
+        ui,
+        fold,
+        'hk-project',
+        'Project · add, edit, delete',
+        true,
+        () => (
+          <Box flexDirection="column">
+            <Text dimColor wrap="truncate-start">{paths.project ? paths.project.replace(/settings\.json$/, 'settings{,.local}.json') : 'no project folder in this session'}</Text>
+            {paths.project !== '' && project.length === 0 && <Text dimColor>no hooks · “+ new” writes to .claude/settings.local.json</Text>}
+            {project.map(r => row(r))}
+          </Box>
+        ),
+        paths.project !== '' ? <Button key="hk-new" plain label="+ new" hotkey="a" onPress={act.fresh} /> : <Text dimColor>{project.length}</Text>,
+      )}
+      <Text dimColor>● on ○ off · press a hook to open it · plugin hooks are not listed</Text>
     </Box>
   )
 }

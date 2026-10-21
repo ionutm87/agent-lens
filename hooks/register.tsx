@@ -11,7 +11,8 @@ import { checkPrompt, parseCheck, worthChecking } from './check'
 import { hasHook, hookFromDraft, mainText, offFile, parseSettings, replaceHook, rowsOf, serialize, withHook, withoutHook } from './settings-hooks'
 import type { HookRef, Settings } from './settings-hooks'
 import { activeStyle, buildStyle, parseStyle, slugName, withOutputStyle } from './styles'
-import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, refsOf, toMermaid, withBody, withoutIndexLine } from './memories'
+import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, refsOf, toMermaid, withBody, withoutIndexLine, withoutLink } from './memories'
+import { card, section as kitSection } from './kit'
 import type { Ref } from './memories'
 import { costOf, tierOf } from './cost'
 import type { Tier } from './cost'
@@ -42,7 +43,6 @@ const memories = atom({ plugin: 'agent-lens', key: 'memories' } as const, [] as 
 const memMeta = atom({ plugin: 'agent-lens', key: 'memMeta' } as const, { dir: '', loaded: false, context: [], remember: [], recalls: [] } as MemoryMeta)
 const memUse = atom({ plugin: 'agent-lens', key: 'memUse' } as const, {} as Record<string, MemoryUse>)
 const memView = atom({ plugin: 'agent-lens', key: 'memView' } as const, null as MemoryView | null)
-const memType = atom({ plugin: 'agent-lens', key: 'memType' } as const, 'all')
 const memAudit = atom({ plugin: 'agent-lens', key: 'memAudit' } as const, { at: 0, running: false, note: '', verdicts: {} } as MemoryAudit)
 const styles = atom({ plugin: 'agent-lens', key: 'styles' } as const, [] as Style[])
 const styleActive = atom({ plugin: 'agent-lens', key: 'styleActive' } as const, '')
@@ -503,6 +503,20 @@ const fixMemory = async ($: Engine, name: string) => {
     $.ui.toast(`${name} rewritten`)
   } catch (err) {
     await update($, memAudit, a => ({ ...a, note: `✗ not rewritten: ${(err as Error).message}` }))
+  }
+  await loadMemories($)
+}
+
+// "unlink": every memory citing a memory that does not exist keeps the word, without the [[ ]].
+const unlinkMemory = async ($: Engine, target: string) => {
+  const { dir } = await read($, memMeta)
+  const list = (await read($, memories)).filter(m => m.links.includes(target))
+  if (!dir || !list.length) return
+  try {
+    for (const m of list) await $.fs.write(`${dir}/${m.file}`, withoutLink(await $.fs.read(`${dir}/${m.file}`), target))
+    $.ui.toast(`[[${target}]] unlinked in ${list.length === 1 ? list[0]!.name : `${list.length} memories`}`)
+  } catch (err) {
+    await update($, memAudit, a => ({ ...a, note: `✗ not unlinked: ${(err as Error).message}` }))
   }
   await loadMemories($)
 }
@@ -1121,19 +1135,8 @@ export const register: Register = on => {
     // Everything foldable: sections, plan steps, execution steps. A missing key = the default state.
     const isOpen = (key: string, byDefault: boolean) => foldNow[key] ?? byDefault
     const toggle = (key: string, open: boolean) => void update($, folds, f => ({ ...f, [key]: open }))
-    const section = (key: string, title: string, byDefault: boolean, body: () => RenderChildren, aside?: RenderChildren) => {
-      const open = isOpen(key, byDefault)
-
-      return (
-        <Box key={`sec-${key}`} flexDirection="column">
-          <Box justifyContent="space-between">
-            <Button key={`fold-${key}`} plain label={`${open ? '▾' : '▸'} ${title}`} onPress={() => toggle(key, !open)} />
-            {aside}
-          </Box>
-          {open && body()}
-        </Box>
-      )
-    }
+    const fold = { isOpen, toggle }
+    const section = (key: string, title: string, byDefault: boolean, body: () => RenderChildren, aside?: RenderChildren) => kitSection({ Box, Text, Button }, fold, key, title, byDefault, body, aside)
 
     // The Flow tab: a stage line, what needs the person first, how the model understood the request, the plan
     // by level (steps on the same level run in parallel: ┬ ├ └) and what was actually executed, step by step.
@@ -1541,37 +1544,48 @@ export const register: Register = on => {
     const stagedN = list.filter(c => c.staged).length
     const codeColor = (code: string) => (code === 'M' ? C.run : code === 'A' || code === '?' ? C.ok : code === 'R' ? C.info : C.bad)
     const branch = branchLabel(repoNow.branch)
+    // Git: the card says where the branch stands, the list is the changes (press a file for its diff).
     const changesView = (
-      <Box flexDirection="column">
-        <Box justifyContent="space-between">
-          <Text wrap="truncate-end">
-            <Text color={C.info}>⑂ {branch.name || '—'}</Text>
-            {branch.sync && <Text color={C.run}> {branch.sync}</Text>}
-          </Text>
-          <Text dimColor>{stagedN} staged · {list.length} total</Text>
-        </Box>
-        {!repoNow.loaded && <Text dimColor>Reading status…</Text>}
-        {repoNow.loaded && !repoNow.top && <Text dimColor>Not a git repository.</Text>}
-        {repoNow.top && list.length === 0 && <Text color={C.ok}>✓ nothing to commit</Text>}
-        {list.slice(0, Math.max(4, room - 8)).map(c => {
-          const slash = c.path.lastIndexOf('/')
+      <Box flexDirection="column" gap={1}>
+        {card(
+          { Box, Text, Button },
+          list.length ? C.run : C.ok,
+          <>
+            <Text wrap="truncate-end">
+              <Text color={C.info}>⑂ {branch.name || '—'}</Text>
+              {branch.sync && <Text color={C.run}> {branch.sync}</Text>}
+              <Text dimColor> · </Text>
+              {list.length ? <Text>{stagedN} of {list.length} files staged</Text> : <Text color={C.ok}>✓ nothing to commit</Text>}
+            </Text>
+            {!repoNow.loaded && <Text dimColor>Reading status…</Text>}
+            {repoNow.loaded && !repoNow.top && <Text dimColor>Not a git repository.</Text>}
+            {repoNow.top !== '' && <Text dimColor>[ ] stage · [x] staged · [~] partly · press a name for its diff</Text>}
+          </>,
+        )}
+        {list.length > 0 &&
+          section('git-list', 'Changes', true, () => (
+            <Box flexDirection="column">
+              {list.slice(0, Math.max(4, room - 8)).map(c => {
+                const slash = c.path.lastIndexOf('/')
 
-          return (
-            <Box key={`ch-${c.path}`} gap={1}>
-              <Button
-                key={`st-${c.path}`}
-                plain
-                label={c.staged && c.unstaged ? '[~]' : c.staged ? '[x]' : '[ ]'}
-                onPress={() => void gitAct($, top => (c.staged && !c.unstaged ? unstage($, top, [c.path]) : stage($, top, [c.path])))}
-              />
-              <Text color={codeColor(c.code)} bold>{c.code}</Text>
-              <Text wrap="truncate-start" dimColor>{slash >= 0 ? c.path.slice(0, slash + 1) : ''}</Text>
-              <Button key={`df-${c.path}`} plain label={c.path.slice(slash + 1)} onPress={() => void openDiff($, c)} />
-              {c.code === '?' ? <Text color={C.ok}>new</Text> : <Text><Text color={C.ok}>+{c.add}</Text> <Text color={C.bad}>-{c.del}</Text></Text>}
+                return (
+                  <Box key={`ch-${c.path}`} gap={1}>
+                    <Button
+                      key={`st-${c.path}`}
+                      plain
+                      label={c.staged && c.unstaged ? '[~]' : c.staged ? '[x]' : '[ ]'}
+                      onPress={() => void gitAct($, top => (c.staged && !c.unstaged ? unstage($, top, [c.path]) : stage($, top, [c.path])))}
+                    />
+                    <Text color={codeColor(c.code)} bold>{c.code}</Text>
+                    <Text wrap="truncate-start" dimColor>{slash >= 0 ? c.path.slice(0, slash + 1) : ''}</Text>
+                    <Button key={`df-${c.path}`} plain label={c.path.slice(slash + 1)} onPress={() => void openDiff($, c)} />
+                    {c.code === '?' ? <Text color={C.ok}>new</Text> : <Text><Text color={C.ok}>+{c.add}</Text> <Text color={C.bad}>-{c.del}</Text></Text>}
+                  </Box>
+                )
+              })}
+              {list.length > Math.max(4, room - 8) && <Text dimColor>… +{list.length - Math.max(4, room - 8)} files (use [stage all])</Text>}
             </Box>
-          )
-        })}
-        {list.length > Math.max(4, room - 8) && <Text dimColor>… +{list.length - Math.max(4, room - 8)} files (use [stage all])</Text>}
+          ), <Text dimColor>{stagedN}/{list.length} staged</Text>)}
       </Box>
     )
 
@@ -1644,7 +1658,7 @@ export const register: Register = on => {
         {tabs}
         {current === 'think' ? (stepDetail || thinkView) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
                   $.ui.resolve(e),
-                  { list: await read($, styles), active: await read($, styleActive), draft: await read($, styleDraft), fresh: await read($, styleFresh), note: await read($, styleNote), loaded: await read($, styleLoaded) },
+                  { list: await read($, styles), active: await read($, styleActive), draft: await read($, styleDraft), fresh: await read($, styleFresh), note: await read($, styleNote), loaded: await read($, styleLoaded), fold },
                   {
                     open: file => void openStyle($, file),
                     back: () => void update($, styleDraft, () => null),
@@ -1658,7 +1672,7 @@ export const register: Register = on => {
                     create: name => void createStyle($, name),
                     refresh: () => void loadStyles($),
                   },
-                ) : current === 'memories' ? memoriesView($.ui.resolve(e), { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), filter: await read($, memType), audit: await read($, memAudit), now: await $.clock.now() }, { analyze: () => void analyzeMemories($), mermaid: (press: { surface?: unknown }) => void copyMermaid($, press?.surface), open: name => void openMemory($, name), back: () => void update($, memView, () => null), filter: t => void update($, memType, () => t), refresh: () => void loadMemories($), fix: name => void fixMemory($, name), remove: names => void deleteMemories($, names) }) : current === 'hooks' ? hooksView(
+                ) : current === 'memories' ? memoriesView($.ui.resolve(e), { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), audit: await read($, memAudit), now: await $.clock.now(), fold }, { analyze: () => void analyzeMemories($), mermaid: (press: { surface?: unknown }) => void copyMermaid($, press?.surface), open: name => void openMemory($, name), back: () => void update($, memView, () => null), refresh: () => void loadMemories($), fix: name => void fixMemory($, name), remove: names => void deleteMemories($, names), unlink: target => void unlinkMemory($, target) }) : current === 'hooks' ? hooksView(
                   $.ui.resolve(e),
                   {
                     rows: await read($, hookRows),
@@ -1666,6 +1680,7 @@ export const register: Register = on => {
                     note: await read($, hookNote),
                     loaded: await read($, hooksLoaded),
                     paths: await read($, hookPaths),
+                    fold,
                     lens: [
                       { key: 'check', label: 'prompt check', on: isChecking, what: 'haiku reads each prompt at submit' },
                       { key: 'plan', label: 'miniplan', on: isPlanFirst, what: 'a plan in Flow before the first tool' },

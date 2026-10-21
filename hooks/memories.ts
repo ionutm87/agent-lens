@@ -124,6 +124,10 @@ export const withoutIndexLine = (text: string, file: string) =>
     .filter(l => !new RegExp(`^\\s*-\\s*\\[[^\\]]*\\]\\(${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`).test(l))
     .join('\n')
 
+// The memory text with [[target]] (or [[target|alias]]) turned into plain words: the link goes, the sentence stays.
+export const withoutLink = (text: string, target: string) =>
+  text.replace(new RegExp(`\\[\\[\\s*${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(?:\\|([^\\]]*))?\\]\\]`, 'g'), (_, alias?: string) => alias ?? target)
+
 // The graph as Mermaid source, to paste in any viewer (GitHub, mermaid.live): one class per type, a missing target dashed.
 export const toMermaid = (list: readonly Pick<Memory, 'name' | 'type' | 'links'>[], verdicts: Record<string, Verdict> = {}) => {
   const id = (name: string) => `m_${name.replace(/[^a-zA-Z0-9]/g, '_')}`

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { backlinks, isolated, namesIn, parseIndex, parseMemory, projectSlug, parseVerdicts, refsOf, toMermaid, withBody, withoutIndexLine } from '../hooks/memories'
+import { backlinks, isolated, namesIn, parseIndex, parseMemory, projectSlug, parseVerdicts, refsOf, toMermaid, withBody, withoutIndexLine, withoutLink } from '../hooks/memories'
 import '../hooks/register'
 
 test('project slug: same as the engine, only the open project memory', () => {
@@ -78,23 +78,28 @@ test('Memories tab: the graph, the index in context and memory neighbors', async
 
   const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'terminal', ...PANE })
   await ui.press({ key: 'tab-memories' })
-  expect(await ui.find({ type: 'Text', text: /IN THE PROMPT/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /FEEDBACK/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'fold-mem-feedback' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /prima/ })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'go-a-b' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /lipsa \(does not exist\)/ })).toBeDefined()
+  // The broken link is one decision in NEEDS YOU, with the memories that cite it.
+  expect(await ui.find({ type: 'Text', text: /does not exist · cited by a/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'mu-lipsa' })).toBeDefined()
+  // "In the prompt" starts folded.
+  expect(await ui.find({ type: 'Text', text: /AutoMem · 1\.2k tok/ })).toBeUndefined()
+  await ui.press({ key: 'fold-mem-prompt' })
   expect(await ui.find({ type: 'Text', text: /AutoMem · 1\.2k tok/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /outside the index/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Not analyzed yet/ })).toBeDefined()
   // "analyze": Sonnet's verdicts land on the nodes, the flagged one shows its why instead of its description.
   await ui.press({ key: 'mem-analyze' })
-  expect(await ui.find({ type: 'Text', text: /◐ 1 stale/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /◐ 1 to look at/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /✗ 1 to delete/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /livrat deja/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /gone: `Mod\.Gone`/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /names gone code/ })).toBeDefined()
   await ui.press({ key: 'mo-a' })
   expect(await ui.find({ type: 'Text', text: /cârligul lui a/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /lipsa \(does not exist yet\)/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /PROPOSED FIX/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /gone from the code: `Mod\.Gone`/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'fold-mv-fix' })).toBeDefined()
   // "apply the fix": the body is replaced, the frontmatter kept, the verdict turns relevant.
   await ui.press({ key: 'mem-fix-a' })
   expect(files['/m/a.md']).toBe('---\nname: a\ndescription: prima\nmetadata:\n  type: feedback\n---\n\nDoar [[b]] rămâne.\n')
@@ -105,7 +110,9 @@ test('Memories tab: the graph, the index in context and memory neighbors', async
   await ui.press({ key: 'mem-del-b' })
   expect('/m/b.md' in files).toBe(false)
   expect(files['/m/MEMORY.md']).toBe('- [A](a.md) — cârligul lui a\n')
-  expect(await ui.find({ type: 'Text', text: /IN THE PROMPT/ })).toBeDefined()
+  // b is gone (its open view closed with it), so a's [[b]] is a broken link now: "unlink" keeps the word.
+  await ui.press({ key: 'mu-b' })
+  expect(files['/m/a.md']).toBe('---\nname: a\ndescription: prima\nmetadata:\n  type: feedback\n---\n\nDoar b rămâne.\n')
   await ui.unmount()
 })
 
@@ -139,4 +146,8 @@ test('mermaid: one node per memory, a missing target dashed, the verdict on the 
   expect(src).toContain('m_cip_pdf["✓ cip-pdf<br/><small>project</small>"]:::project')
   expect(src).toContain('m_cip_pdf --> m_layout')
   expect(src).toContain('m_cip_pdf -.-> m_gone["✗ gone"]:::missing')
+})
+
+test('unlink: [[x]] and [[x|alias]] become words, other links stay', () => {
+  expect(withoutLink('Vezi [[x]], [[ x |zis]] și [[y]].', 'x')).toBe('Vezi x, zis și [[y]].')
 })

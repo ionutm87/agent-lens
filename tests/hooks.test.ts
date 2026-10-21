@@ -79,7 +79,7 @@ test('hooks tab: no Button nested in a Text, in the list and in each editor', ()
   const lens = [{ key: 'check', label: 'prompt check', on: true, what: 'x' }]
   const draftOf = (row: (typeof rows)[number] | null) => ({ row, scope: 'local' as const, event: 'Stop', matcher: '', text: 'a.sh', timeout: '' })
   for (const draft of [null, draftOf(null), draftOf(rows[0]!), draftOf(rows.at(-1)!)]) {
-    const tree = hooksView(ui, { rows, draft, note: '✓ ok', loaded: true, paths, lens }, act)
+    const tree = hooksView(ui, { rows, draft, note: '✓ ok', loaded: true, paths, lens, fold: { isOpen: (_k: string, d: boolean) => d, toggle: () => {} } }, act)
     expect(kind(tree)).toBe('Box')
     expect(bad(tree)).toBe(false)
   }

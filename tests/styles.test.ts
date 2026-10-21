@@ -42,7 +42,7 @@ test('style tab: no Button nested in a Text', () => {
   const kids = (n: any): any[] => [n?.children, n?.props?.children].flat(Infinity).filter(c => c && typeof c === 'object')
   const bad = (n: any, inText = false): boolean => (inText && kind(n) === 'Button') || kids(n).some(c => bad(c, inText || kind(n) === 'Text'))
   for (const draft of [null, { file: 'a.md', description: 'd', lines: ['x', 'y'], dirty: false }]) {
-    const tree = stylesView(ui, { list: [s], active: 'a', draft, fresh: '', note: '✓ ok', loaded: true }, act)
+    const tree = stylesView(ui, { list: [s], active: 'a', draft, fresh: '', note: '✓ ok', loaded: true, fold: { isOpen: (_k: string, d: boolean) => d, toggle: () => {} } }, act)
     expect(kind(tree)).toBe('Box')
     expect(bad(tree)).toBe(false)
   }

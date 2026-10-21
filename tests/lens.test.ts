@@ -45,7 +45,7 @@ test('the sidebar renders and the tabs switch', async ($, on) => {
     expect(await ui.find({ type: 'Text', text: /styles · active/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /42%/ })).toBeDefined()
     await ui.press({ key: 'tab-hooks' })
-    expect(await ui.find({ type: 'Text', text: /GLOBAL/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'fold-hk-global' })).toBeDefined()
     await ui.press({ key: 'tab-think' })
     expect(await ui.find({ type: 'Button', key: 'fold-exec' })).toBeDefined()
     await ui.unmount()

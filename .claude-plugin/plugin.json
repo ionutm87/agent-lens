@@ -1,6 +1,6 @@
 {
   "name": "agent-lens",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Claude Code sidebar: plan and execution flow, prompt check at submit, subagent workers, git, memories, output styles and a Hooks tab for the settings hooks.",
   "types": "./types/index.d.ts",
   "author": {

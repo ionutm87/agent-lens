@@ -12,9 +12,13 @@ step with each step's model, tokens and cost, and the subagent workers. Around i
   and "next time, write it like this" always last. A step the model would hand to a subagent on another model shows the suggestion;
   nothing is delegated until you press it. No model routing: the session model does the work.
 - **Git** — status, stage/unstage, diff per file, a Haiku-written commit message, commit, sync.
-- **Memories** — the project's auto-memory as a graph, how it reaches the model, and a Sonnet audit
-  (relevant / stale / irrelevant) that first checks the paths and symbols each memory names against the
-  repo, proposes a fix for a stale one and deletes on click.
+- **Memories** — the project's auto-memory: a health card (✓ fine / ◐ to look at / ✗ to delete), NEEDS YOU
+  with one decision per row (a link to a memory that does not exist, grouped, `unlink` keeps the word; what
+  the Sonnet audit flagged, with fix/delete; code that is gone; a memory outside `MEMORY.md`), then one
+  section per type. The audit first checks the paths and symbols each memory names against the repo.
+
+Every tab uses Flow's layout: a card on top with where things stand, NEEDS YOU for decisions, foldable
+sections with the summary on the right.
 - **Styles** (`Aa`, `y`) — the output styles, two lines each: the name (opens it to edit the description
   and instructions line by line) with `use` on the right, the description under it. `use` writes
   `outputStyle` in `settings.json`, read at the start of the next session; a new style starts as a copy of
