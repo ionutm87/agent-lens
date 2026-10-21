@@ -84,9 +84,6 @@ const modelColor = (model: string) => TIER_COLOR[tierOf(model) ?? 'opus']
 
 const short = (model: string) => model.replace(/^claude-/, '').replace(/-\d{8}$/, '')
 
-// Pill with the tier's initial (H/S/O) in the tier's color, so the model of each step reads at a glance.
-const pill = (model: string) => (tierOf(model) ?? short(model)).slice(0, 1).toUpperCase()
-
 const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n))
 
 // "2h13m" until the limit window resets
@@ -1045,59 +1042,31 @@ export const register: Register = on => {
             />
           </Box>
         </Box>
-        <Text>
-          <Text dimColor>model </Text>
-          <Text bold color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
-          {last?.effort && <Text dimColor> · effort </Text>}
-          {last?.effort && <Text color={C.info}>{last.effort}</Text>}
-        </Text>
-        {graphReady && (
-          <Box justifyContent="space-between">
-            <Text wrap="truncate-end">
-              <Text dimColor>codegraph </Text>
-              {isGraphFirst ? <Text color={C.graph}>first, before Grep/Glob</Text> : <Text dimColor>free</Text>}
-            </Text>
-            <Button key="graph" plain label={isGraphFirst ? '[off]' : '[on]'} hotkey="g" onPress={() => update($, graphFirst, v => !v)} />
-          </Box>
-        )}
-        <Box justifyContent="space-between">
-          <Text wrap="truncate-end">
-            <Text dimColor>miniplan </Text>
-            {isPlanFirst ? <Text color={C.accent}>first in Flow: what I understand, how I act</Text> : <Text dimColor>off</Text>}
-          </Text>
-          <Button key="planfirst" plain label={isPlanFirst ? '[off]' : '[on]'} hotkey="n" onPress={() => update($, planFirst, v => !v)} />
-        </Box>
-        <Box justifyContent="space-between">
-          <Text wrap="truncate-end">
-            <Text dimColor>prompt check </Text>
-            {isChecking ? <Text color={C.accent}>haiku at submit: gaps + questions</Text> : <Text dimColor>off</Text>}
-          </Text>
-          <Button key="check" plain label={isChecking ? '[off]' : '[on]'} hotkey="k" onPress={() => void flipCheck($)} />
-        </Box>
-        <Text dimColor>
-          turn: {turnSteps.length} steps · {k(tokensIn)}↑ {k(tokensOut)}↓ · cache {tokensIn ? Math.round((cacheRead / tokensIn) * 100) : 0}%
-        </Text>
-        {/* API list prices: on a subscription this is a measure, not the bill. */}
+        {/* One line each: who works, how much room is left (context, 5h / 7-day from /usage), what it costs
+            (API list prices: on a subscription a measure, not the bill), then the switches. */}
         <Text wrap="truncate-end">
-          <Text dimColor>turn cost </Text>
+          <Text bold color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
+          {last?.effort && <Text color={C.info}> {last.effort}</Text>}
+          <Text dimColor> · turn </Text>
           <Text>{usd(turnCost)}</Text>
           <Text dimColor> · session </Text>
           <Text>{usd(sum.cost ?? 0)}</Text>
         </Text>
-        {/* From /usage: the account's context and 5h / 7-day limits. */}
-        <Box gap={2}>
-          <Text wrap="truncate-end">
-            <Text dimColor>context </Text>
-            <Text color={pctColor(context.percent ?? 0, 85)}>{context.percent ?? '—'}%</Text>
-            <Text dimColor> {k(context.tokens ?? 0)}/{k(context.window)}</Text>
-          </Text>
+        <Text wrap="truncate-end">
+          <Text dimColor>context </Text>
+          <Text color={pctColor(context.percent ?? 0, 85)}>{context.percent ?? '—'}%</Text>
           {rateLimits.filter(r => r.kind === 'five_hour' || r.kind === 'seven_day').map(r => (
-            <Text key={`rl-${r.kind}`} wrap="truncate-end">
-              <Text dimColor>{WINDOWS[r.kind]} </Text>
+            <Text key={`rl-${r.kind}`}>
+              <Text dimColor> · {WINDOWS[r.kind]} </Text>
               <Text color={pctColor(r.percentUsed, 90)}>{r.percentUsed}%</Text>
-              {r.resetsAt && <Text dimColor> · {until(Date.parse(r.resetsAt) - now)}</Text>}
+              {r.resetsAt && <Text dimColor> {until(Date.parse(r.resetsAt) - now)}</Text>}
             </Text>
           ))}
+        </Text>
+        <Box gap={1}>
+          <Button key="planfirst" plain dimColor={!isPlanFirst} label={`${isPlanFirst ? '✓' : '○'} miniplan`} hotkey="n" onPress={() => update($, planFirst, v => !v)} />
+          <Button key="check" plain dimColor={!isChecking} label={`${isChecking ? '✓' : '○'} prompt check`} hotkey="k" onPress={() => void flipCheck($)} />
+          {graphReady && <Button key="graph" plain dimColor={!isGraphFirst} label={`${isGraphFirst ? '✓' : '○'} graph first`} hotkey="g" onPress={() => update($, graphFirst, v => !v)} />}
         </Box>
       </Box>
     )
@@ -1147,7 +1116,6 @@ export const register: Register = on => {
     const graphN = turnTools.filter(t => t.startsWith('codegraph:')).length
     const classicN = turnTools.filter(t => /^(Read|Grep|Glob)$/.test(t)).length
     const graphCells = graphN + classicN === 0 ? 0 : Math.round((graphN / (graphN + classicN)) * 10)
-    const maxIn = Math.max(1, ...turnSteps.map(s => s.tokensIn))
     const turnWorkers = allWorkers.filter(w => w.startedAt >= since)
 
     // Everything foldable: sections, plan steps, execution steps. A missing key = the default state.
@@ -1171,6 +1139,7 @@ export const register: Register = on => {
     // by level (steps on the same level run in parallel: ┬ ├ └) and what was actually executed, step by step.
     const STATUS_MARK = { todo: ['○', undefined], run: ['●', C.run], done: ['✓', C.ok], skip: ['⊘', undefined] } as const
     const WORKER_COLOR = { running: C.run, done: C.ok, aborted: C.bad, denied: C.bad } as const
+    const sessionTier = tierOf(String(sessionModel ?? '')) ?? 'opus'
     const planLevels = planNow ? layers(planNow.steps) : []
     const doneN = planNow?.steps.filter(s => s.status === 'done' || s.status === 'skip').length ?? 0
     const clarityColor = (n: number) => (n >= 8 ? C.ok : n >= 5 ? C.run : C.bad)
@@ -1191,21 +1160,48 @@ export const register: Register = on => {
       <Text wrap="truncate-end">
         {PHASES.map((name, i) => (
           <Text key={`phase-${name}`}>
-            {i > 0 && <Text dimColor> ─ </Text>}
+            {i > 0 && <Text dimColor> → </Text>}
             <Text color={i < phaseAt ? C.ok : i === phaseAt ? C.run : undefined} dimColor={i > phaseAt || phase === 'idle'} bold={i === phaseAt}>
               {i < phaseAt ? '✓' : i === phaseAt ? '●' : '○'} {name}
             </Text>
           </Text>
         ))}
-        {phase === 'idle' && <Text dimColor> · send a prompt</Text>}
       </Text>
     )
 
+    // Where the turn is, at a glance: the request, the stage and the plan's progress with the step under way.
+    const runningStep = planNow?.steps.find(s => s.status === 'run')
+    const total = planNow?.steps.length ?? 0
+    const filled = total ? Math.round((doneN / total) * 10) : 0
+    const nowCard = (
+      <Box flexDirection="column" borderStyle="round" borderColor={phase === 'done' ? C.ok : phase === 'idle' ? C.info : C.run} borderDimColor={phase === 'idle'} paddingX={1}>
+        {lastPrompt !== '' ? (
+          <Text wrap="truncate-end">
+            <Text color={C.accent}>▸ </Text>
+            <Text italic>{lastPrompt.replace(/\s+/g, ' ')}</Text>
+          </Text>
+        ) : (
+          <Text dimColor>Send a prompt: the plan shows up here first.</Text>
+        )}
+        {phaseLine}
+        {total > 0 && (
+          <Text wrap="truncate-end">
+            <Text color={C.ok}>{'▰'.repeat(filled)}</Text>
+            <Text dimColor>{'▱'.repeat(10 - filled)} {doneN}/{total}</Text>
+            {runningStep && <Text dimColor> · now </Text>}
+            {runningStep && <Text color={C.run}>{runningStep.title}</Text>}
+          </Text>
+        )}
+      </Box>
+    )
+
+    // A plan step as a checklist row: the level (1a, 1b = same level, run in parallel), the mark, the title.
+    // A press on the title opens what it waits for, what runs beside it and the subagent suggestion.
     const planStep = (s: PlanStep, level: PlanStep[], li: number, si: number) => {
       const [mark, markColor] = STATUS_MARK[s.status]
-      const branch = level.length === 1 ? '──' : si === 0 ? '┬─' : si === level.length - 1 ? '└─' : '├─'
+      const num = `${li + 1}${level.length > 1 ? String.fromCharCode(97 + si) : ''}`.padStart(3)
       const key = `p-${s.id}`
-      const open = isOpen(key, s.status === 'run')
+      const open = isOpen(key, false)
       const deps = s.after.map(id => planNow?.steps.find(x => x.id === id)?.title ?? id)
       const peers = level.filter(x => x.id !== s.id).map(x => x.title)
       const isSkip = s.status === 'skip'
@@ -1214,34 +1210,34 @@ export const register: Register = on => {
       const isConfirmed = Boolean(a && a.state !== 'draft')
       const onTier = s.tier ? turnWorkers.filter(w => (tierOf(w.model) ?? 'opus') === s.tier) : []
       const canDelegate = s.tier && !isSkip && s.status !== 'done' && !isConfirmed
+      // The session model's own tier is the default: only another model is worth a tag.
+      const isOther = s.tier && s.tier !== sessionTier
 
       return (
         <Box key={`ps-${s.id}`} flexDirection="column">
           <Box>
-            <Text dimColor>{si === 0 ? `${String(li + 1).padStart(2)} ` : '   '}{branch} </Text>
-            <Button key={`fold-${key}`} plain label={open ? '▾' : '▸'} onPress={() => toggle(key, !open)} />
-            <Text wrap="truncate-end" dimColor={isSkip}>
-              <Text color={markColor}> {mark} </Text>
-              <Text strikethrough={isSkip}>{s.title}</Text>
-              {s.tier && (
-                <Text color={TIER_COLOR[s.tier]}>
-                  {' '}⤷ {s.tier}{isConfirmed ? ' ✓' : onTier.some(w => w.status === 'running') ? ' ●' : canDelegate ? ' ?' : ''}
-                </Text>
-              )}
-            </Text>
+            <Text dimColor>{num} </Text>
+            <Text color={markColor} bold={s.status === 'run'}>{mark} </Text>
+            <Button key={`fold-${key}`} plain dimColor={s.status === 'done' || isSkip} label={s.title} onPress={() => toggle(key, !open)} />
+            {isOther && (
+              <Text color={TIER_COLOR[s.tier!]} wrap="truncate-end">
+                {' '}⤷ {s.tier}{isConfirmed ? ' ✓' : onTier.some(w => w.status === 'running') ? ' ●' : canDelegate ? ' ?' : ''}
+              </Text>
+            )}
           </Box>
           {open && (
             <Box flexDirection="column">
               {deps.length > 0 && <Text wrap="wrap" dimColor>{pad}after: {deps.join(', ')}</Text>}
               {peers.length > 0 && <Text wrap="wrap" dimColor>{pad}in parallel with: {peers.join(', ')}</Text>}
-              {s.tier && (
+              {deps.length === 0 && peers.length === 0 && !isOther && <Text dimColor>{pad}no dependencies</Text>}
+              {isOther && (
                 <Text wrap="wrap">
                   <Text dimColor>{pad}</Text>
-                  <Text color={TIER_COLOR[s.tier]}>⤷ a {s.tier} subagent could take this</Text>
+                  <Text color={TIER_COLOR[s.tier!]}>⤷ a {s.tier} subagent could take this</Text>
                   {s.why !== '' && <Text dimColor> · {s.why}</Text>}
                 </Text>
               )}
-              {canDelegate && (
+              {isOther && canDelegate && (
                 <Box>
                   <Text dimColor>{pad}</Text>
                   <Button key={`dg-${s.id}`} label={`delegate to ${s.tier}`} onPress={() => void answer($, ask, delegationText(s))} />
@@ -1262,46 +1258,36 @@ export const register: Register = on => {
       )
     }
 
-    const execStep = (s: Step, i: number, all: Step[]) => {
-      const isLast = i === all.length - 1
-      const branch = s.agentId ? '│ ⤷' : isLast ? '└─' : '├─'
-      const gutter = s.agentId || !isLast ? '│      ' : '       '
-      const cells = Math.max(1, Math.round((s.tokensIn / maxIn) * 8))
+    // An executed step on one row: its number, the tools it called (or its answer) and its input tokens. The model
+    // shows only when it is not the session's (a subagent, another tier); ▸ opens each tool's input.
+    const execStep = (s: Step) => {
       const key = `x-${s.id}`
       const open = isOpen(key, !s.isDone)
       const uses = s.uses ?? []
       const said = (s.answer ?? '').replace(/\s+/g, ' ').trim()
+      const gutter = s.agentId ? '         ' : '       '
 
       return (
         <Box key={s.id} flexDirection="column">
           <Box>
-            <Text dimColor>{branch} </Text>
+            <Text dimColor>{s.agentId ? '  ⤷' : ''}{`#${s.index}`.padStart(4)} </Text>
             <Button key={`fold-${key}`} plain label={open ? '▾' : '▸'} onPress={() => toggle(key, !open)} />
-            <Text>
+            <Text wrap="truncate-end">
               {' '}
               {s.agentId && <Text color={C.run}>{workerType(s.agentId)} </Text>}
-              <Text bold inverse color={modelColor(s.model)}> {pill(s.model)} </Text>
-              <Text bold color={modelColor(s.model)}> {short(s.model)}</Text>
-              {s.effort && <Text color={C.info}> {s.effort}</Text>}
-              <Text dimColor> #{s.index} </Text>
-            </Text>
-            <Text wrap="truncate-end">
-              {s.isDone ? (
-                <Text>
-                  <Text color={modelColor(s.model)}>{'▮'.repeat(cells)}</Text>
-                  <Text dimColor>{'▯'.repeat(8 - cells)} {k(s.tokensIn)}↑ {k(s.tokensOut)}↓</Text>
-                </Text>
-              ) : (
+              {(s.agentId || (tierOf(s.model) ?? 'opus') !== sessionTier) && <Text bold color={modelColor(s.model)}>{short(s.model)} </Text>}
+              {!s.isDone ? (
                 <Text color={C.run}>● running…</Text>
+              ) : s.tools.length ? (
+                chips(s.tools)
+              ) : s.stop === 'end_turn' ? (
+                <Text color={C.ok}>✓ answer </Text>
+              ) : (
+                <Text dimColor>■ {s.stop ?? '—'} </Text>
               )}
+              {s.isDone && <Text dimColor>{k(s.tokensIn)}↑</Text>}
             </Text>
           </Box>
-          {s.isDone && !open && (
-            <Text wrap="truncate-end">
-              <Text dimColor>{gutter}</Text>
-              {s.tools.length ? chips(s.tools) : s.stop === 'end_turn' ? <Text color={C.ok}>✓ answer</Text> : <Text dimColor>■ {s.stop ?? '—'}</Text>}
-            </Text>
-          )}
           {open && (
             <Box flexDirection="column">
               {uses.map((u, ui) => {
@@ -1384,27 +1370,27 @@ export const register: Register = on => {
     }
 
     // The request as it should have been written, copyable so the next prompt can start from it.
+    const copyButton = (key: string, text: string) => (
+      <Button key={`${key}-copy`} plain label="[copy]" onPress={(press: { surface?: unknown }) => void copyText($, text, press?.surface)} />
+    )
     const betterRow = (key: string, text: string, top: number) => (
       <Box key={key} flexDirection="column" marginTop={top}>
         <Box justifyContent="space-between">
           <Text dimColor>next time, write it like this:</Text>
-          <Button key={`${key}-copy`} plain label="[copy]" onPress={(press: { surface?: unknown }) => void copyText($, text, press?.surface)} />
+          {copyButton(key, text)}
         </Box>
         <Text wrap="wrap" italic>„{text}”</Text>
       </Box>
     )
 
+    const answeredQ = questions.filter(q => !isOpenQ(q.ask))
+    const otherTiers = planNow?.steps.some(s => s.tier && s.tier !== sessionTier)
+
+    // Top to bottom: where the turn is, what needs the person, how the model read the request, the plan as a
+    // checklist, what ran; then the folded extras, and "next time" always last.
     const thinkView = (
       <Box flexDirection="column" gap={1}>
-        <Box flexDirection="column">
-          {lastPrompt !== '' && (
-            <Text wrap="truncate-end">
-              <Text color={C.accent}>▸ </Text>
-              <Text italic>{lastPrompt.replace(/\s+/g, ' ')}</Text>
-            </Text>
-          )}
-          {phaseLine}
-        </Box>
+        {nowCard}
         {(openQ.length > 0 || suggested.length > 0) && (
           <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1}>
             <Text bold color={C.info}>
@@ -1428,122 +1414,104 @@ export const register: Register = on => {
           </Box>
         )}
         {checkNow &&
-          section('check', `PROMPT CHECK${checkNow.running ? ' …' : checkNow.note ? ' ✗' : ` ${checkNow.clarity}/10`}`, !planNow, () => (
-            <Box flexDirection="column">
-              {checkNow.running && <Text color={C.run}>● haiku is reading your prompt…</Text>}
-              {checkNow.note !== '' && <Text wrap="wrap" dimColor>{checkNow.note}</Text>}
-              {!checkNow.running && checkNow.note === '' && (
-                <Box flexDirection="column">
-                  <Text>
-                    <Text dimColor>clarity </Text>
-                    <Text color={clarityColor(checkNow.clarity)}>{'▮'.repeat(checkNow.clarity)}</Text>
-                    <Text dimColor>{'▯'.repeat(10 - checkNow.clarity)} {checkNow.clarity}/10 · from the prompt alone</Text>
-                  </Text>
-                  {checkNow.missing.length === 0 && checkNow.questions.length === 0 && <Text color={C.ok}>✓ nothing important missing</Text>}
-                  {checkNow.missing.map((m, i) => (
-                    <Text key={`cm-${i}`} wrap="wrap">
-                      <Text color={C.run}>– </Text>
-                      {m}
-                    </Text>
-                  ))}
-                  {checkNow.better !== '' && betterRow('cbetter', checkNow.better, 1)}
-                </Box>
-              )}
-            </Box>
-          ))}
+          section(
+            'check',
+            'Prompt check',
+            !planNow,
+            () => (
+              <Box flexDirection="column">
+                {checkNow.running && <Text color={C.run}>● haiku is reading your prompt…</Text>}
+                {checkNow.note !== '' && <Text wrap="wrap" dimColor>{checkNow.note}</Text>}
+                {!checkNow.running && checkNow.note === '' && (
+                  <Box flexDirection="column">
+                    {checkNow.missing.length === 0 && checkNow.questions.length === 0 && <Text color={C.ok}>✓ nothing important missing</Text>}
+                    {checkNow.missing.map((m, i) => (
+                      <Text key={`cm-${i}`} wrap="wrap">
+                        <Text color={C.run}>– </Text>
+                        {m}
+                      </Text>
+                    ))}
+                    {checkNow.better !== '' && betterRow('cbetter', checkNow.better, 1)}
+                  </Box>
+                )}
+              </Box>
+            ),
+            checkNow.running ? (
+              <Text color={C.run}>…</Text>
+            ) : checkNow.note ? (
+              <Text color={C.bad}>✗</Text>
+            ) : (
+              <Text color={clarityColor(checkNow.clarity)}>clarity {checkNow.clarity}/10</Text>
+            ),
+          )}
         {!planNow && phase !== 'idle' && <Text dimColor>● the model is reading the request; its plan lands here first.</Text>}
         {planNow &&
-          section('goal', 'UNDERSTAND', true, () => (
-            <Box flexDirection="column">
-              <Text wrap="wrap">
-                <Text color={C.accent}>▸ </Text>
-                {planNow.goal || '—'}
-              </Text>
-              <Text>
-                <Text dimColor>clarity </Text>
-                <Text color={clarityColor(planNow.clarity)}>{'▮'.repeat(planNow.clarity)}</Text>
-                <Text dimColor>{'▯'.repeat(10 - planNow.clarity)} {planNow.clarity}/10</Text>
-                {planNow.revision > 0 && <Text dimColor> · rev {planNow.revision}</Text>}
-              </Text>
-              {(planNow.approach ?? '') !== '' && (
-                <Text wrap="wrap">
-                  <Text color={C.info}>→ </Text>
-                  {planNow.approach}
-                </Text>
-              )}
-              {planNow.assumptions.length > 0 && (
-                <Box flexDirection="column">
-                  {planNow.assumptions.map((a, i) => (
-                    <Text key={`as-${i}`} wrap="wrap">
-                      <Text color={C.run}>~ </Text>
-                      <Text dimColor>assumes </Text>
-                      {a}
-                    </Text>
-                  ))}
-                </Box>
-              )}
-            </Box>
-          ))}
-        {planNow &&
           section(
-            'plan',
-            `PLAN ${doneN}/${planNow.steps.length}`,
+            'goal',
+            'Understanding',
             true,
             () => (
               <Box flexDirection="column">
-                {planLevels.map((level, li) => (
-                  <Box key={`lv-${li}`} flexDirection="column">
-                    {level.map((s, si) => planStep(s, level, li, si))}
-                    {li < planLevels.length - 1 && <Text dimColor>{'   │'}</Text>}
-                  </Box>
+                <Text wrap="wrap" bold>{planNow.goal || '—'}</Text>
+                {(planNow.approach ?? '') !== '' && (
+                  <Text wrap="wrap">
+                    <Text color={C.info}>→ </Text>
+                    {planNow.approach}
+                  </Text>
+                )}
+                {planNow.assumptions.map((a, i) => (
+                  <Text key={`as-${i}`} wrap="wrap" dimColor>
+                    <Text color={C.run}>~ </Text>
+                    {a}
+                  </Text>
                 ))}
+              </Box>
+            ),
+            <Text>
+              <Text color={clarityColor(planNow.clarity)}>clarity {planNow.clarity}/10</Text>
+              {planNow.revision > 0 && <Text dimColor> · rev {planNow.revision}</Text>}
+            </Text>,
+          )}
+        {planNow &&
+          section(
+            'plan',
+            'Plan',
+            true,
+            () => (
+              <Box flexDirection="column">
+                {planLevels.map((level, li) => level.map((s, si) => planStep(s, level, li, si)))}
                 <Text dimColor wrap="truncate-end">
-                  ○ todo ● running ✓ done ⊘ skipped{planNow.steps.some(s => s.tier) ? ' · ⤷ a subagent could take it (▸ to allow)' : ''}
+                  press a step for details{planLevels.some(l => l.length > 1) ? ' · 1a, 1b run in parallel' : ''}{otherTiers ? ' · ⤷ a subagent could take it' : ''}
                 </Text>
               </Box>
             ),
-            <Text dimColor>{planLevels.length > 1 ? `${planLevels.length} levels` : ''}</Text>,
+            <Text color={doneN === planNow.steps.length ? C.ok : undefined} dimColor={doneN < planNow.steps.length}>{doneN}/{planNow.steps.length} done</Text>,
           )}
         {section(
           'exec',
-          `EXECUTION ${turnSteps.length} steps`,
+          'Execution',
           true,
           () => (
             <Box flexDirection="column">
-              {turnSteps.length === 0 && <Text dimColor>No steps yet. Send a prompt.</Text>}
-              {turnSteps.length > 0 && (
+              {turnSteps.length === 0 && <Text dimColor>No steps yet.</Text>}
+              {(skillList.length > 0 || (graphReady && graphN + classicN > 0)) && (
                 <Text wrap="truncate-end">
-                  <Text dimColor>path </Text>
-                  {turnSteps.slice(-30).map(s => (
-                    <Text key={`m-${s.id}`} color={s.isDone ? modelColor(s.model) : C.run}>
-                      {s.agentId ? (s.isDone ? '◆' : '◇') : s.isDone ? '■' : '▪'}
-                    </Text>
-                  ))}
-                  <Text dimColor> ■ main ◆ worker</Text>
+                  {graphReady && graphN + classicN > 0 && <Text color={C.graph}>◈ graph {graphN} </Text>}
+                  {graphReady && graphN + classicN > 0 && <Text dimColor>⌕ search {classicN} </Text>}
+                  {skillList.length > 0 && <Text color={C.info}>✦ {skillList.map(([n, c]) => (c > 1 ? `${n}×${c}` : n)).join(' · ')}</Text>}
                 </Text>
               )}
-              {graphReady && turnSteps.length > 0 && (
-                <Text wrap="truncate-end">
-                  <Text dimColor>graph </Text>
-                  <Text color={C.graph}>{'▮'.repeat(graphCells)}</Text>
-                  <Text dimColor>{'▯'.repeat(10 - graphCells)}</Text>
-                  <Text dimColor> ◈{graphN} · ⌕{classicN}</Text>
-                </Text>
-              )}
-              {skillList.length > 0 && (
-                <Text wrap="truncate-end">
-                  <Text dimColor>skills </Text>
-                  <Text color={C.info}>✦ {skillList.map(([n, c]) => (c > 1 ? `${n}×${c}` : n)).join(' · ')}</Text>
-                </Text>
-              )}
+              {turnSteps.length > room && <Text dimColor>… {turnSteps.length - room} earlier steps</Text>}
               {turnSteps.slice(-room).map(execStep)}
             </Box>
           ),
-          <Text dimColor>{k(tokensIn)}↑ {k(tokensOut)}↓</Text>,
+          <Text dimColor>
+            {turnSteps.length} steps · {k(tokensIn)}↑ {k(tokensOut)}↓ · cache {tokensIn ? Math.round((cacheRead / tokensIn) * 100) : 0}%
+          </Text>,
         )}
         {planNow &&
           planNow.savings.length > 0 &&
-          section('save', `SAVINGS ${planNow.savings.length}`, false, () => (
+          section('save', `Savings · ${planNow.savings.length}`, false, () => (
             <Box flexDirection="column">
               {planNow.savings.map((v, i) => (
                 <Text key={`sv-${i}`} wrap="wrap">
@@ -1553,12 +1521,9 @@ export const register: Register = on => {
               ))}
             </Box>
           ))}
-        {questions.some(q => !isOpenQ(q.ask)) &&
-          section('answered', `ANSWERED ${questions.filter(q => !isOpenQ(q.ask)).length}`, false, () => (
-            <Box flexDirection="column">{questions.filter(q => !isOpenQ(q.ask)).map((q, i) => questionRow('a', q, i, false))}</Box>
-          ))}
-        {planNow && planNow.betterPrompt !== '' && section('better', 'NEXT TIME', false, () => betterRow('better', planNow.betterPrompt, 0))}
-        {section('tools', 'TOOLS IN SESSION', false, () => (
+        {answeredQ.length > 0 &&
+          section('answered', `Answered · ${answeredQ.length}`, false, () => <Box flexDirection="column">{answeredQ.map((q, i) => questionRow('a', q, i, false))}</Box>)}
+        {section('tools', 'Tools in session', false, () => (
           <Text wrap="wrap">
             {Object.entries(counts)
               .sort((a, b) => b[1] - a[1])
@@ -1567,6 +1532,9 @@ export const register: Register = on => {
               .join(' · ') || '—'}
           </Text>
         ))}
+        {planNow &&
+          planNow.betterPrompt !== '' &&
+          section('better', 'Next time, write it like this', true, () => <Text wrap="wrap" italic>„{planNow.betterPrompt}”</Text>, copyButton('better', planNow.betterPrompt))}
       </Box>
     )
 

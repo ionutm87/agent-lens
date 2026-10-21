@@ -6,9 +6,10 @@ step with each step's model, tokens and cost, and the subagent workers. Around i
 
 - **Prompt check** — at submit, Haiku reads your prompt alone and lists what is missing, up to three
   questions you answer with one click (the answers reach the model mid-turn) and the prompt rewritten.
-- **Flow** — a stage line (understand → plan → execute → done), what needs you first (questions with
-  numbered options, `0` keeps the default), the plan by level (steps on one level run in parallel), the
-  execution step by step. A step the model would hand to a subagent on another model shows the suggestion;
+- **Flow** — a "now" card (the request, understand → plan → execute → done, the plan's progress and the
+  step under way), what needs you (questions with numbered options, `0` keeps the default), the plan as a
+  checklist (`1a`, `1b` run in parallel; press a step for its details), the execution one row per step,
+  and "next time, write it like this" always last. A step the model would hand to a subagent on another model shows the suggestion;
   nothing is delegated until you press it. No model routing: the session model does the work.
 - **Git** — status, stage/unstage, diff per file, a Haiku-written commit message, commit, sync.
 - **Memories** — the project's auto-memory as a graph, how it reaches the model, and a Sonnet audit

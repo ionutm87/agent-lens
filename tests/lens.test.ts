@@ -104,12 +104,16 @@ test('Flow tab: the plan published through the tool renders by level', async ($,
     await ui.press({ key: 'tab-think' })
     expect(await ui.find({ type: 'Text', text: /New tab that shows/ })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'fold-plan' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /┬─/ })).toBeDefined()
-    // Only the active step (b, "run") is open by default; a click closes it.
-    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ })).toBeDefined()
-    await ui.press({ key: 'fold-p-b' })
+    // a and b share level 1 (1a, 1b run in parallel); the now card names the step under way.
+    expect(await ui.find({ type: 'Text', text: /1b/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /read the API/ })).toBeDefined()
+    // Steps start closed; a press on the title opens the details, another closes them.
     expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ })).toBeUndefined()
     await ui.press({ key: 'fold-p-b' })
+    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ })).toBeDefined()
+    await ui.press({ key: 'fold-p-b' })
+    // "Next time" is the last section and open.
+    expect(await ui.find({ type: 'Text', text: /Add a Flow tab to agent-lens/ })).toBeDefined()
     // The open question sits in NEEDS YOU with numbered options; the step suggestion waits for a press.
     expect(await ui.find({ type: 'Text', text: /Static or live/ })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'q-0-o-0' })).toBeDefined()
