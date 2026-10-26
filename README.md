@@ -22,6 +22,19 @@ step with each step's model, tokens and cost, and the subagent workers. Around i
   Effort Picker, with Romanian words): a big handoff gets xhigh, an audit max, money, people, deploys, deletes or
   something broken get high, a quick question low, "da" / "ok" keep your level. Auto applies it to that message
   only; a level you set to xhigh or max is never lowered; `− lower` / `+ higher` while it works.
+- **Band above the prompt** — the task (plan progress as a bar, `Tasks 2/3`), the step under way, the prompt
+  cache clock (`keep warm`), context %, then one offer at a time: a held prompt with its gaps, the cache about to go
+  cold, a handoff when the context passes the threshold, a correction to save as a rule; the effort of this message
+  under it while it works. `✕` hides it until the next prompt.
+- **Agents** — every subagent as a card (a pixel crab on the desktop), Running / Finished / Stopped, with its
+  type, model, tokens, time, the plan step it works for, what it does now and all its steps.
+- **Chat** — what this chat used: tools, connectors (MCP servers with their tools), files read and written,
+  skills, the plan as a to-do, and the last turn's edits replayed one by one (`/replay`).
+- **Reflect** — a correction in your words (free check) goes to Haiku, which keeps it only as a lasting rule;
+  NEEDS YOU and the band offer to save it to this project's or the global `CLAUDE.md`.
+- **Setup** — the switches of what used to be separate mods (helper-desk, brain-dump, cache-clock, handoff,
+  reflect, effort-picker), the thresholds (handoff at context %, cache lifetime and warning, hold length), the
+  other plugins from `settings.json` (on/off, counts after `/reload-plugins`), and the way into Hooks and Styles.
 - **Git** — status, stage/unstage, diff per file, a Haiku-written commit message, commit, sync.
 - **Memories** — the project's auto-memory: a health card (✓ fine / ◐ to look at / ✗ to delete), NEEDS YOU
   with one decision per row (a link to a memory that does not exist, grouped, `unlink` keeps the word; what
@@ -39,7 +52,8 @@ sections with the summary on the right.
   "Off" parks the hook in a sibling `*.hooks-off.json`; a change applies from the next session.
 - **CodeGraph first** — in a project with a `.codegraph/` index, `codegraph_explore` goes before Grep/Glob.
 
-`/lens` opens the pane. Hotkeys inside it: `f` Flow, `c` Git, `e` Memories, `h` Hooks, `y` Styles,
+`/lens` opens the pane, `/replay` its Chat tab replaying the last turn's edits. Hotkeys inside it: `f` Flow,
+`w` Agents, `i` Chat, `c` Git, `e` Memories, `o` Setup, `h` Hooks (in Setup), `y` Styles,
 `k` prompt check, `n` miniplan, `g` codegraph, `b` hold long prompts, `v` effort mode; `1`-`4` answer the
 first open question, `0` keeps its default.
 

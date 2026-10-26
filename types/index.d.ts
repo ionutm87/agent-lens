@@ -34,9 +34,11 @@ export type Worker = {
   tools: number
   prompt?: string
   answer?: string
+  // The plan step under way when it started: the step it works for.
+  planStep?: string
 }
 
-export type Tab = 'think' | 'changes' | 'memories' | 'styles' | 'hooks'
+export type Tab = 'think' | 'agents' | 'chat' | 'changes' | 'memories' | 'setup' | 'styles' | 'hooks'
 
 export type Change = { path: string; code: string; staged: boolean; unstaged: boolean; add: number; del: number }
 
@@ -132,6 +134,30 @@ export type HookRow = { id: string; scope: 'global' | 'project' | 'local'; file:
 export type HookDraft = { row: HookRow | null; scope: 'project' | 'local'; event: string; matcher: string; text: string; timeout: string }
 export type HookPaths = { global: string; project: string; local: string }
 
+// A file the chat read or wrote (Chat tab).
+export type FileTouch = { path: string; read: number; wrote: number }
+
+// One edit of a turn, replayed in the Chat tab: `at` = the turn it belongs to (turnAt).
+export type EditRec = { at: number; path: string; old: string; new: string }
+
+// Setup: switches and thresholds kept across sessions ($.store 'setup').
+export type Setup = {
+  band: boolean
+  cache: boolean
+  handoff: boolean
+  reflect: boolean
+  handoffAt: number
+  cacheTtlMin: number
+  cacheWarnS: number
+  holdWords: number
+}
+
+// A correction the person made, turned by Haiku into a rule to save (Reflect).
+export type Reflect = { at: number; text: string; rule: string; running: boolean; state: 'open' | 'saved' | 'skipped'; note: string }
+
+// A plugin from settings.json enabledPlugins (Setup · Other mods).
+export type PluginRow = { id: string; on: boolean }
+
 declare module 'claude-code' {
   interface PluginState {
     'agent-lens': {
@@ -186,6 +212,16 @@ declare module 'claude-code' {
       released: string
       holdOn: boolean
       stageView: Stage | null
+      files: FileTouch[]
+      edits: EditRec[]
+      editIdx: number
+      setup: Setup
+      reflect: Reflect | null
+      idleAt: number
+      tick: number
+      bandHidden: boolean
+      handoffSnooze: number
+      plugins: PluginRow[]
     }
   }
 }

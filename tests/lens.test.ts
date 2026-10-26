@@ -44,7 +44,9 @@ test('the sidebar renders and the tabs switch', async ($, on) => {
     await ui.press({ key: 'tab-styles' })
     expect(await ui.find({ type: 'Text', text: /styles · active/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /42%/ })).toBeDefined()
-    await ui.press({ key: 'tab-hooks' })
+    await ui.press({ key: 'tab-setup' })
+    expect(await ui.find({ type: 'Button', key: 'sw-band' })).toBeDefined()
+    await ui.press({ key: 'setup-hooks' })
     expect(await ui.find({ type: 'Button', key: 'fold-hk-global' })).toBeDefined()
     await ui.press({ key: 'tab-think' })
     // Nothing sent yet: Flow opens on "before"; Execution sits in "working".

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Engine, HookFor, Register, RenderChildren } from 'claude-code'
 
-import type { Answer, Change, Did, Diff, EffortMode, EffortPick, GitNote, Held, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PromptCheck, Repo, Stage, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
+import type { Answer, Change, Did, Diff, EditRec, EffortMode, EffortPick, FileTouch, GitNote, Held, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PluginRow, PromptCheck, Reflect, Repo, Setup, Stage, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
 import { asLevel, pickFor, rank, shift, tipFor } from './effort'
 import { branchLabel, cleanMessage, clip, outcomeOf, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
 import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, delegationAsk, delegationText, layers, normalizePlan } from './plan'
@@ -13,7 +13,12 @@ import { hasHook, hookFromDraft, mainText, offFile, parseSettings, replaceHook, 
 import type { HookRef, Settings } from './settings-hooks'
 import { activeStyle, buildStyle, parseStyle, slugName, withOutputStyle } from './styles'
 import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, refsOf, toMermaid, withBody, withoutIndexLine, withoutLink } from './memories'
-import { card, section as kitSection } from './kit'
+import { card, section as kitSection, tiles } from './kit'
+import { agentsView } from './agents-tab'
+import { chatView } from './chat-tab'
+import { setupView } from './setup-tab'
+import type { Switch } from './setup-tab'
+import { DEFAULT_SETUP, HANDOFF_PROMPT, barSvg, cacheLeft, cycle, isCorrection, mmss, parseRule, rulePrompt, setupOf, withRule } from './extras'
 import type { Ref } from './memories'
 import { costOf, tierOf } from './cost'
 import type { Tier } from './cost'
@@ -71,9 +76,17 @@ const held = atom({ plugin: 'agent-lens', key: 'held' } as const, null as Held |
 const released = atom({ plugin: 'agent-lens', key: 'released' } as const, '')
 const holdOn = atom({ plugin: 'agent-lens', key: 'holdOn' } as const, true)
 const stageView = atom({ plugin: 'agent-lens', key: 'stageView' } as const, null as Stage | null)
+const files = atom({ plugin: 'agent-lens', key: 'files' } as const, [] as FileTouch[])
+const edits = atom({ plugin: 'agent-lens', key: 'edits' } as const, [] as EditRec[])
+const editIdx = atom({ plugin: 'agent-lens', key: 'editIdx' } as const, 0)
+const setup = atom({ plugin: 'agent-lens', key: 'setup' } as const, DEFAULT_SETUP as Setup)
+const reflect = atom({ plugin: 'agent-lens', key: 'reflect' } as const, null as Reflect | null)
+const idleAt = atom({ plugin: 'agent-lens', key: 'idleAt' } as const, 0)
+const tick = atom({ plugin: 'agent-lens', key: 'tick' } as const, 0)
+const bandHidden = atom({ plugin: 'agent-lens', key: 'bandHidden' } as const, false)
+const handoffSnooze = atom({ plugin: 'agent-lens', key: 'handoffSnooze' } as const, 0)
+const plugins = atom({ plugin: 'agent-lens', key: 'plugins' } as const, [] as PluginRow[])
 
-// A prompt this long is held for a look before it is sent (once: Enter on the same text sends it).
-const HOLD_WORDS = 40
 // A message's effort pick waits this long for its turn, unless the turn carries the same text.
 const PICK_MS = 15_000
 
@@ -809,6 +822,116 @@ const openHook = async ($: Engine, r: HookRow | null) => {
 
 // The main loop's steps run at the message's picked effort. At the turn's first step the pick learns the level it
 // starts from and the model (for the tip); a level the person set to xhigh or max is never lowered.
+// Setup: one value changed, kept across sessions.
+const setSetup = async ($: Engine, patch: Partial<Setup>) => {
+  const next = { ...(await read($, setup)), ...patch }
+  await update($, setup, () => next)
+  await $.store.set('setup', next)
+}
+
+const THRESHOLD_CHOICES: Partial<Record<keyof Setup, readonly number[]>> = { handoffAt: [70, 80, 90], cacheTtlMin: [5, 60], cacheWarnS: [30, 60, 120], holdWords: [30, 40, 60] }
+const nextThreshold = async ($: Engine, key: keyof Setup) => {
+  const choices = THRESHOLD_CHOICES[key]
+  if (choices) await setSetup($, { [key]: cycle(choices, (await read($, setup))[key] as number) })
+}
+
+// Setup · Other plugins: settings.json enabledPlugins, read and switched in place.
+const settingsFile = async ($: Engine) => `${await configDir($)}/settings.json`
+const loadPlugins = async ($: Engine) => {
+  let o: { enabledPlugins?: Record<string, boolean> } = {}
+  try {
+    const file = await settingsFile($)
+    if (await $.fs.exists(file)) o = JSON.parse(await $.fs.read(file))
+  } catch {
+    o = {}
+  }
+  await update($, plugins, () => Object.entries(o.enabledPlugins ?? {}).map(([id, on]) => ({ id, on: on === true })))
+}
+const flipPlugin = async ($: Engine, id: string) => {
+  const file = await settingsFile($)
+  const o = JSON.parse(await $.fs.read(file)) as { enabledPlugins?: Record<string, boolean> }
+  const on = !(o.enabledPlugins?.[id] === true)
+  o.enabledPlugins = { ...o.enabledPlugins, [id]: on }
+  await $.fs.write(file, `${JSON.stringify(o, null, 2)}\n`)
+  await loadPlugins($)
+  $.ui.toast(`${id.split('@')[0]} ${on ? 'on' : 'off'}: /reload-plugins to apply`)
+}
+
+// Reflect: a correction (found in the words, free) goes to Haiku, which keeps it only as a lasting rule.
+const runReflect = async ($: Engine, text: string, at: number) => {
+  const said = (await read($, steps)).filter(s => !s.agentId && s.answer).at(-1)?.answer ?? ''
+  await update($, reflect, () => ({ at, text, rule: '', running: true, state: 'open' as const, note: '' }))
+  let rule = ''
+  try {
+    const res = await $.model.complete({ model: 'haiku', effort: 'low', maxTokens: 120, timeoutMs: 30_000, prompt: rulePrompt(text, said) })
+    rule = res.isAnswered ? parseRule(res.text) : ''
+  } catch {
+    rule = ''
+  }
+  await update($, reflect, r => (r?.at !== at ? r : rule ? { ...r, rule, running: false } : null))
+  if (rule) await logDid($, '✎', `You corrected Claude: offered to save „${clip(rule, 60)}” as a rule`, 'info')
+}
+
+// The rule goes into the project's CLAUDE.md or the global one (<config>/CLAUDE.md), under its own heading.
+const saveRule = async ($: Engine, where: 'project' | 'all') => {
+  const r = await read($, reflect)
+  if (!r?.rule) return
+  const file = where === 'project' ? `${await $.session.root()}/CLAUDE.md` : `${await configDir($)}/CLAUDE.md`
+  const body = (await $.fs.exists(file)) ? await $.fs.read(file) : ''
+  await $.fs.write(file, withRule(body, r.rule))
+  await update($, reflect, x => (x ? { ...x, state: 'saved' as const, note: file } : x))
+  $.ui.toast(`Rule saved to ${where === 'project' ? 'this project' : 'every project'}`)
+}
+
+const writeHandoff = async ($: Engine) => {
+  await logDid($, '⇢', 'Asked Claude for a handoff prompt (context almost full)', 'info')
+  await $.prompt.submit({ text: HANDOFF_PROMPT })
+}
+
+const keepWarm = async ($: Engine) => {
+  await logDid($, '◔', 'Kept the prompt cache warm', 'info')
+  await $.prompt.submit({ text: 'Agent Lens keep-alive: reply with just "ok".' })
+}
+
+// The Chat tab's replay: one edit per step, back, forward, or all of them one after another.
+let replayTimer: { cancel: () => void } | null = null
+const stepEdit = async ($: Engine, by: number) => {
+  const list = await read($, edits)
+  const n = list.filter(x => x.at === list.at(-1)?.at).length
+  await update($, editIdx, i => Math.max(0, Math.min(n - 1, i + by)))
+}
+const replayEdits = async ($: Engine) => {
+  replayTimer?.cancel()
+  await update($, editIdx, () => 0)
+  replayTimer = $.clock.every(1200, () => {
+    void (async () => {
+      const list = await read($, edits)
+      const n = list.filter(x => x.at === list.at(-1)?.at).length
+      if ((await read($, editIdx)) >= n - 1) {
+        replayTimer?.cancel()
+        replayTimer = null
+      } else await stepEdit($, 1)
+    })()
+  })
+}
+
+// Files the chat read or wrote, and each edit of the turn (for the replay).
+const trackFile = async ($: Engine, e: { tool: string; [key: string]: unknown }) => {
+  const path = typeof e.file_path === 'string' ? e.file_path : typeof e.notebook_path === 'string' ? e.notebook_path : ''
+  if (!path || !/^(Read|Write|Edit|NotebookEdit)$/.test(e.tool)) return
+  const isRead = e.tool === 'Read'
+  await update($, files, list => {
+    const old = list.find(f => f.path === path)
+    const row = { path, read: (old?.read ?? 0) + (isRead ? 1 : 0), wrote: (old?.wrote ?? 0) + (isRead ? 0 : 1) }
+
+    return [...list.filter(f => f.path !== path), row].slice(-80)
+  })
+  if (isRead) return
+  const at = await read($, turnAt)
+  const rec: EditRec = { at, path, old: clip(String(e.old_string ?? ''), 2000), new: clip(String(e.new_string ?? e.content ?? e.new_source ?? ''), 2000) }
+  await update($, edits, list => [...list.filter(x => x.at === at), rec].slice(-40))
+}
+
 type StepIn = Parameters<HookFor<'turn.step'>>[1]
 const withEffort = async ($: Engine, e: StepIn): Promise<StepIn> => {
   const from = asLevel(e.effort)
@@ -854,6 +977,14 @@ export const register: Register = on => {
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'lens', description: 'Open the Agent Lens sidebar' })
+    await $.command.register({ name: 'replay', description: "Replay the last turn's edits in Agent Lens" })
+    const saved = setupOf(await $.store.get('setup'))
+    await update($, setup, () => saved)
+    // The band's clock (cache countdown): only the band reads `tick`, so only the band redraws.
+    $.clock.every(5000, () => void (async () => {
+      const t = await $.clock.now()
+      await update($, tick, () => t)
+    })())
     await $.tool.register({ name: PLAN_TOOL, description: PLAN_DESCRIPTION, inputSchema: PLAN_SCHEMA, isDeferred: false })
     void refreshChanges($)
     void loadMemories($)
@@ -876,6 +1007,14 @@ export const register: Register = on => {
     await $.ui.open({ id: PANE, title: 'Agent Lens', focus: true })
 
     return { text: 'Agent Lens opened.' }
+  })
+
+  on('command.run', { command: 'replay' }, async $ => {
+    await update($, tab, () => 'chat' as Tab)
+    await $.ui.open({ id: PANE, title: 'Agent Lens', focus: true })
+    void replayEdits($)
+
+    return { text: "Replaying the last turn's edits in Agent Lens · Chat." }
   })
 
   // A prompt sent by a human counts as "requested": the panel settles at any width,
@@ -903,10 +1042,14 @@ export const register: Register = on => {
       await update($, promptCheck, () => null)
       await update($, did, () => [])
       await update($, stageView, () => null)
+      await update($, bandHidden, () => false)
+      await update($, reflect, () => null)
+      if ((await read($, setup)).reflect && isCorrection(e.text)) void runReflect($, e.text, now)
     }
     // Before you send: a long typed prompt stops once, goes back into the box (nothing is lost) and Haiku reads
     // it; Flow offers the finished prompt. If the box cannot take it back, the prompt goes out as usual.
-    const isLong = e.text.trim().split(/\s+/).length >= HOLD_WORDS
+    // A prompt this long (Setup · holdWords) is held for a look before it is sent (once: Enter on the same text sends it).
+    const isLong = e.text.trim().split(/\s+/).length >= (await read($, setup)).holdWords
     if (isFresh && isTyped && e.command === undefined && isLong && worthChecking(e.text) && (await read($, holdOn)) && (await read($, checkOn))) {
       const back = await $.prompt.fill({ text: e.text, mode: 'replace' }).catch(() => null)
       if (back?.isFilled) {
@@ -1005,6 +1148,7 @@ export const register: Register = on => {
     }
 
     const res = await next(e)
+    if (res.deny === undefined && !res.isError) await trackFile($, e as never)
     if (e.agentId || res.deny !== undefined || res.isError) return res
     const text = await takeAnswers($)
 
@@ -1084,7 +1228,9 @@ export const register: Register = on => {
       startedAt: await $.clock.now(),
       tools: 0,
       prompt: clip(e.prompt, 1500),
+      planStep: (await read($, plan))?.steps.find(s => s.status === 'run')?.title,
     }
+    void $.ui.open({ id: PANE, title: 'Agent Lens' })
     await update($, workers, list => [...list, worker].slice(-30))
 
     const res = await next(e)
@@ -1106,6 +1252,8 @@ export const register: Register = on => {
     if (!e.agentId) {
       void refreshChanges($)
       await update($, busy, () => false)
+      const idle = await $.clock.now()
+      await update($, idleAt, () => idle)
       // Questions left unanswered: the model went with its default, said once per question.
       const answeredNow = await read($, answers)
       const asked = [...((await read($, promptCheck))?.questions ?? []), ...((await read($, plan))?.questions ?? [])]
@@ -1159,7 +1307,7 @@ export const register: Register = on => {
     const lastPrompt = await read($, prompt)
     // A tab saved by an older version (Steps, Skills) falls back to Flow.
     const stored = String(await read($, tab))
-    const current: Tab = ['think', 'changes', 'memories', 'styles', 'hooks'].includes(stored) ? (stored as Tab) : 'think'
+    const current: Tab = ['think', 'agents', 'chat', 'changes', 'memories', 'setup', 'styles', 'hooks'].includes(stored) ? (stored as Tab) : 'think'
     const foldNow = await read($, folds)
     const sessionModel = await $.session.model()
     const sum = await read($, totals)
@@ -1174,6 +1322,9 @@ export const register: Register = on => {
     const heldNow = await read($, held)
     const isHolding = await read($, holdOn)
     const stageNow = await read($, stageView)
+    const setupNow = await read($, setup)
+    const reflectNow = await read($, reflect)
+    const ui = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Svg?: any }
     const { context, rateLimits } = await $.session.usage()
     const now = await $.clock.now()
     const room = Math.max(6, (e.viewport?.rows ?? 30) - 12)
@@ -1189,10 +1340,15 @@ export const register: Register = on => {
     const running = allWorkers.filter(w => w.status === 'running').length
     const workerType = (agentId: string) => allWorkers.find(w => w.agentId === agentId)?.type ?? 'worker'
 
+    const five = rateLimits.find(r => r.kind === 'five_hour')
     const header = (
       <Box flexDirection="column" borderStyle="round" borderColor={C.accent} paddingX={1}>
         <Box justifyContent="space-between">
-          <Text bold color={C.accent}>◆ AGENT LENS</Text>
+          <Text wrap="truncate-end">
+            <Text bold color={C.accent}>◆ AGENT LENS </Text>
+            <Text bold color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
+            {last?.effort && <Text color={C.info}> {last.effort}</Text>}
+          </Text>
           <Box gap={1}>
             <Text color={running ? C.run : C.ok}>{running ? `● ${running} worker${running > 1 ? 's' : ''}` : '○ idle'}</Text>
             {/* Output styles: a small icon, not a tab; pressed again it goes back to Flow. */}
@@ -1208,35 +1364,18 @@ export const register: Register = on => {
             />
           </Box>
         </Box>
-        {/* One line each: who works, how much room is left (context, 5h / 7-day from /usage), what it costs
-            (API list prices: on a subscription a measure, not the bill), then the switches. */}
-        <Text wrap="truncate-end">
-          <Text bold color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
-          {last?.effort && <Text color={C.info}> {last.effort}</Text>}
-          <Text dimColor> · turn </Text>
-          <Text>{usd(turnCost)}</Text>
-          <Text dimColor> · session </Text>
-          <Text>{usd(sum.cost ?? 0)}</Text>
-        </Text>
-        <Text wrap="truncate-end">
-          <Text dimColor>context </Text>
-          <Text color={pctColor(context.percent ?? 0, 85)}>{context.percent ?? '—'}%</Text>
-          {rateLimits.filter(r => r.kind === 'five_hour' || r.kind === 'seven_day').map(r => (
-            <Text key={`rl-${r.kind}`}>
-              <Text dimColor> · {WINDOWS[r.kind]} </Text>
-              <Text color={pctColor(r.percentUsed, 90)}>{r.percentUsed}%</Text>
-              {r.resetsAt && <Text dimColor> {until(Date.parse(r.resetsAt) - now)}</Text>}
-            </Text>
-          ))}
-        </Text>
+        {/* How much room is left (context, 5h from /usage) and what it costs (API list prices: on a
+            subscription a measure, not the bill). */}
+        {tiles(ui, 'head', [
+          { label: 'turn', value: usd(turnCost), color: 'yellow' },
+          { label: 'session', value: usd(sum.cost ?? 0), color: 'yellow' },
+          { label: 'context', value: `${context.percent ?? '—'}%`, color: pctColor(context.percent ?? 0, 85) },
+          { label: five?.resetsAt ? `5h · ${until(Date.parse(five.resetsAt) - now)}` : '5h', value: five ? `${five.percentUsed}%` : '—', color: five ? pctColor(five.percentUsed, 90) : undefined },
+        ])}
         <Box gap={1}>
           <Button key="planfirst" plain dimColor={!isPlanFirst} label={`${isPlanFirst ? '✓' : '○'} miniplan`} hotkey="n" onPress={() => update($, planFirst, v => !v)} />
           <Button key="check" plain dimColor={!isChecking} label={`${isChecking ? '✓' : '○'} prompt check`} hotkey="k" onPress={() => void flipCheck($)} />
           {graphReady && <Button key="graph" plain dimColor={!isGraphFirst} label={`${isGraphFirst ? '✓' : '○'} graph first`} hotkey="g" onPress={() => update($, graphFirst, v => !v)} />}
-        </Box>
-        <Box gap={1}>
-          <Button key="hold" plain dimColor={!isHolding} label={`${isHolding ? '✓' : '○'} hold long prompts`} hotkey="b" onPress={() => void flipHold($)} />
-          <Button key="effort-mode" plain dimColor={effortModeNow === 'off'} label={`${effortModeNow === 'off' ? '○' : '✓'} effort ${effortModeNow}`} hotkey="v" onPress={() => void flipEffortMode($)} />
         </Box>
       </Box>
     )
@@ -1246,21 +1385,27 @@ export const register: Register = on => {
         {(
           [
             ['think', 'Flow', 'f'],
+            ['agents', running ? `Agents ●${running}` : 'Agents', 'w'],
+            ['chat', 'Chat', 'i'],
             ['changes', `Git ${list.length}`, 'c'],
             ['memories', 'Memories', 'e'],
-            ['hooks', 'Hooks', 'h'],
+            ['setup', 'Setup', 'o'],
           ] as [Tab, string, string][]
         ).map(([id, label, hotkey]) => (
           <Button
             key={`tab-${id}`}
             label={label}
             hotkey={hotkey}
-            variant={current === id ? 'primary' : 'secondary'}
+            variant={current === id || (id === 'setup' && (current === 'hooks' || current === 'styles')) ? 'primary' : 'secondary'}
             onPress={() => {
               void update($, tab, () => id)
               if (id === 'changes') void refreshChanges($)
               if (id === 'memories') void loadMemories($)
-              if (id === 'hooks') void loadHooks($)
+              if (id === 'setup') {
+                void loadPlugins($)
+                void loadHooks($)
+                void loadStyles($)
+              }
             }}
           />
         ))}
@@ -1316,14 +1461,23 @@ export const register: Register = on => {
     const runningStep = planNow?.steps.find(s => s.status === 'run')
     const total = planNow?.steps.length ?? 0
     const filled = total ? Math.round((doneN / total) * 10) : 0
-    const progress = total > 0 && (
+    const progress = total > 0 && (ui.Svg ? (
+      <Box gap={1} alignItems="center">
+        <ui.Svg key="flow-bar" source={barSvg(doneN, total, 200, '', { light: '#86efac', mid: '#22c55e', deep: '#16a34a', track: '#ecfdf3' })} alt={`${doneN} of ${total} steps done`} width={200} height={14} />
+        <Text wrap="truncate-end">
+          <Text dimColor>{doneN}/{total}</Text>
+          {runningStep && <Text dimColor> · now </Text>}
+          {runningStep && <Text color={C.run}>{runningStep.title}</Text>}
+        </Text>
+      </Box>
+    ) : (
       <Text wrap="truncate-end">
         <Text color={C.ok}>{'▰'.repeat(filled)}</Text>
         <Text dimColor>{'▱'.repeat(10 - filled)} {doneN}/{total}</Text>
         {runningStep && <Text dimColor> · now </Text>}
         {runningStep && <Text color={C.run}>{runningStep.title}</Text>}
       </Text>
-    )
+    ))
 
     // A plan step as a checklist row: the level (1a, 1b = same level, run in parallel), the mark, the title.
     // A press on the title opens what it waits for, what runs beside it and the subagent suggestion.
@@ -1543,14 +1697,15 @@ export const register: Register = on => {
     // plan, the step suggestions to confirm.
     const needsYou = (withDelegations: boolean) => {
       const asks = withDelegations ? suggested : []
-      if (!openQ.length && !asks.length) return null
+      const rule = reflectNow?.state === 'open' && reflectNow.rule ? reflectNow.rule : ''
+      if (!openQ.length && !asks.length && !rule) return null
 
       return (
         <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1}>
           <Text bold color={C.info}>
             NEEDS YOU{' '}
             <Text dimColor>
-              {[openQ.length ? `${openQ.length} question${openQ.length > 1 ? 's' : ''}` : '', asks.length ? `${asks.length} delegation${asks.length > 1 ? 's' : ''} to confirm` : ''].filter(Boolean).join(' · ')}
+              {[openQ.length ? `${openQ.length} question${openQ.length > 1 ? 's' : ''}` : '', asks.length ? `${asks.length} delegation${asks.length > 1 ? 's' : ''} to confirm` : '', rule ? '1 rule to save' : ''].filter(Boolean).join(' · ')}
             </Text>
           </Text>
           {openQ.map((q, i) => questionRow('q', q, i, i === 0))}
@@ -1564,7 +1719,21 @@ export const register: Register = on => {
               <Button key={`sgb-${s.id}`} plain label={`[delegate]`} onPress={() => void answer($, delegationAsk(s), delegationText(s))} />
             </Box>
           ))}
-          <Text dimColor>{openQ.length ? '1-4 pick · 0 keeps the default · ' : ''}unanswered = the model goes with its default</Text>
+          {rule !== '' && (
+            <Box flexDirection="column" marginTop={openQ.length || asks.length ? 1 : 0}>
+              <Text wrap="wrap">
+                <Text color="magenta" bold>✎ </Text>
+                You corrected Claude: <Text italic>„{rule}”</Text>
+              </Text>
+              <Box gap={1}>
+                <Text>{'  '}</Text>
+                <Button key="rule-project" plain label="[save to this project]" onPress={() => void saveRule($, 'project')} />
+                <Button key="rule-all" plain label="[save everywhere]" onPress={() => void saveRule($, 'all')} />
+                <Button key="rule-skip" plain dimColor label="[skip]" onPress={() => void update($, reflect, r => (r ? { ...r, state: 'skipped' as const } : r))} />
+              </Box>
+            </Box>
+          )}
+          {(openQ.length > 0 || asks.length > 0) && <Text dimColor>{openQ.length ? '1-4 pick · 0 keeps the default · ' : ''}unanswered = the model goes with its default</Text>}
         </Box>
       )
     }
@@ -1919,11 +2088,28 @@ export const register: Register = on => {
       </Box>
     )
 
+    // Setup's switches: Agent Lens's own, each from the mod it used to be.
+    const switchesNow: Switch[] = [
+      { key: 'plan', label: 'miniplan before the first tool', on: isPlanFirst, from: 'agent-lens' },
+      { key: 'check', label: 'prompt check', on: isChecking, from: 'brain-dump' },
+      ...(graphReady ? [{ key: 'graph', label: 'codegraph first', on: isGraphFirst, from: 'agent-lens' }] : []),
+      { key: 'hold', label: 'hold long prompts', on: isHolding, from: 'brain-dump', hotkey: 'b' },
+      { key: 'effort', label: 'effort per message', on: effortModeNow !== 'off', from: 'effort-picker', hotkey: 'v', value: effortModeNow },
+      { key: 'band', label: 'task band above the prompt', on: setupNow.band, from: 'helper-desk' },
+      { key: 'cache', label: 'cache clock in the band', on: setupNow.cache, from: 'cache-clock' },
+      { key: 'handoff', label: 'handoff offer', on: setupNow.handoff, from: 'handoff' },
+      { key: 'reflect', label: 'save corrections as rules', on: setupNow.reflect, from: 'reflect' },
+    ]
+    const flipSwitch = (key: string) =>
+      key === 'plan' ? update($, planFirst, v => !v) : key === 'check' ? flipCheck($) : key === 'graph' ? update($, graphFirst, v => !v) : key === 'hold' ? flipHold($) : key === 'effort' ? flipEffortMode($) : setSetup($, { [key]: !setupNow[key as 'band'] })
+    const hookList = await read($, hookRows)
+    const hooksSummary = `${hookList.filter(h => h.scope === 'global').length} global · ${hookList.filter(h => h.scope !== 'global').length} project · ${hookList.filter(h => h.isOff).length} off`
+
     return (
       <Box flexDirection="column" gap={1} minHeight={e.props.scroll.bodyRows}>
         {header}
         {tabs}
-        {current === 'think' ? (stepDetail || thinkView) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
+        {current === 'think' ? (stepDetail || thinkView) : current === 'agents' ? agentsView(ui, { workers: allWorkers, steps: allSteps, now, fold, short, k, usd }) : current === 'chat' ? chatView(ui, { counts, skills: used, files: await read($, files), edits: await read($, edits), editIdx: await read($, editIdx), plan: planNow, fold }, { step: by => void stepEdit($, by), replay: () => void replayEdits($) }) : current === 'setup' ? setupView(ui, { switches: switchesNow, setup: setupNow, plugins: await read($, plugins), hooks: hooksSummary, style: (await read($, styleActive)) || '—', fold }, { flip: key => void flipSwitch(key), next: key => void nextThreshold($, key), plugin: id => void flipPlugin($, id), hooks: () => { void update($, tab, () => 'hooks' as Tab); void loadHooks($) }, styles: () => { void update($, tab, () => 'styles' as Tab); void loadStyles($) } }) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
                   $.ui.resolve(e),
                   { list: await read($, styles), active: await read($, styleActive), draft: await read($, styleDraft), fresh: await read($, styleFresh), note: await read($, styleNote), loaded: await read($, styleLoaded), fold },
                   {
@@ -1968,6 +2154,139 @@ export const register: Register = on => {
                 ) : null}
         <Box flexGrow={1} />
         {current === 'changes' && gitControls}
+      </Box>
+    )
+  })
+
+  // The band above the prompt: the task line (plan progress, cache clock, context), the step under way, then one
+  // offer at a time (prompt check, cache going cold, handoff, a rule to save) and the effort of this message.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const conf = await read($, setup)
+    if (e.props.hasSurvey || !conf.band || (await read($, bandHidden))) return next(e)
+    const planNow = await read($, plan)
+    const heldNow = await read($, held)
+    const isWorking = e.props.isWorking || (await read($, busy))
+    const idle = await read($, idleAt)
+    if (!planNow && !heldNow && !isWorking && !idle) return next(e)
+
+    const { Box, Text, Button, ...rest } = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Svg?: any }
+    const Svg = rest.Svg
+    const now = Math.max(await read($, tick), await $.clock.now())
+    const { context } = await $.session.usage()
+    const ctx = context.percent ?? 0
+    const total = planNow?.steps.length ?? 0
+    const doneN = planNow?.steps.filter(s => s.status === 'done' || s.status === 'skip').length ?? 0
+    const pct = total ? Math.round((doneN / total) * 100) : 0
+    const runStep = planNow?.steps.find(s => s.status === 'run')
+    const left = conf.cache && !isWorking ? cacheLeft(idle, now, conf.cacheTtlMin) : null
+    const mainSteps = (await read($, steps)).filter(s => !s.agentId)
+    const cached = mainSteps.at(-1)?.tokensIn ?? 0
+    const title = clip((planNow?.goal || (await read($, prompt)) || 'Agent Lens').replace(/\s+/g, ' '), 60)
+    const cols = e.props.bodyColumns
+
+    const taskLine = (
+      <Box key="band-task" gap={1} alignItems="center">
+        <Text color="magenta">●</Text>
+        <Text bold wrap="truncate-end">{title}</Text>
+        {total > 0 &&
+          (Svg ? (
+            <Svg key="band-bar" source={barSvg(doneN, total, 280, `Tasks ${doneN}/${total}`)} alt={`Tasks ${doneN} of ${total}, ${pct} percent`} width={280} height={14} />
+          ) : (
+            <Text>
+              <Text color="magenta">{'▰'.repeat(Math.round(pct / 10))}</Text>
+              <Text dimColor>{'▱'.repeat(10 - Math.round(pct / 10))} {doneN}/{total}</Text>
+            </Text>
+          ))}
+        {total > 0 && <Text dimColor>{pct}%</Text>}
+        <Box flexGrow={1} />
+        {conf.cache && (isWorking ? <Text color="blue">◔ cache warm</Text> : left !== null && <Text color={left === 0 ? 'red' : left <= conf.cacheWarnS * 1000 ? 'yellow' : 'blue'}>{left === 0 ? '◌ cache cold' : `◔ cache ${mmss(left)}`}</Text>)}
+        {conf.cache && !isWorking && left !== null && left > 0 && <Button key="band-warm" plain label="keep warm" onPress={() => void keepWarm($)} />}
+        <Text color={ctx >= conf.handoffAt ? 'red' : ctx >= conf.handoffAt - 20 ? 'yellow' : 'green'}>ctx {ctx}%</Text>
+        <Button key="band-hide" plain dimColor label="✕" onPress={() => void update($, bandHidden, () => true)} />
+      </Box>
+    )
+
+    // One offer, the first that applies.
+    const check = await read($, promptCheck)
+    const answered = await read($, answers)
+    const openQ = [...(check?.questions ?? []), ...(planNow?.questions ?? [])].filter((q, i, all) => all.findIndex(x => x.ask === q.ask) === i && (answered[q.ask]?.state ?? 'draft') === 'draft')
+    const firstQ = openQ[0]
+    const finished = check?.better || planNow?.betterPrompt || ''
+    const ref = await read($, reflect)
+    const snooze = await read($, handoffSnooze)
+    const offer = heldNow ? (
+      <Box key="band-held" flexDirection="column">
+        <Text wrap="truncate-end">
+          <Text bold color="yellow">⏸ Long prompt held</Text>
+          <Text dimColor>{check?.running ? ' · haiku is reading it…' : check && !check.note ? ` · clarity ${check.clarity}/10${openQ.length ? ` · ${openQ.length} gap${openQ.length > 1 ? 's' : ''}` : ''}` : ''}</Text>
+        </Text>
+        {openQ.slice(0, 2).map((q, i) => (
+          <Box key={`band-q-${i}`} gap={1}>
+            <Text wrap="truncate-end">? {q.ask}</Text>
+            {q.options.slice(0, 2).map((o, oi) => (
+              <Button key={`band-q-${i}-${oi}`} plain label={`[${oi + 1} ${o}${oi === 0 ? ' ★' : ''}]`} onPress={() => void answer($, q.ask, o)} />
+            ))}
+          </Box>
+        ))}
+        <Box gap={1}>
+          {finished !== '' && <Button key="band-send-finished" label="send the finished prompt" variant="primary" onPress={() => void sendHeld($, finished, true)} />}
+          <Button key="band-send-mine" label="send as is" onPress={() => void sendHeld($, heldNow.text, false)} />
+        </Box>
+      </Box>
+    ) : firstQ && isWorking ? (
+      <Box key="band-ask" gap={1}>
+        <Text wrap="truncate-end">
+          <Text bold color="blue">? </Text>
+          {firstQ.ask}
+        </Text>
+        {firstQ.options.slice(0, 3).map((o, oi) => (
+          <Button key={`band-a-${oi}`} plain label={`[${o}${oi === 0 ? ' ★' : ''}]`} onPress={() => void answer($, firstQ.ask, o)} />
+        ))}
+      </Box>
+    ) : left !== null && left > 0 && left <= conf.cacheWarnS * 1000 ? (
+      <Box key="band-cache" gap={1}>
+        <Text bold color="yellow">◕ Cache cold in {mmss(left)}</Text>
+        <Text dimColor wrap="truncate-end">{k(cached)} tokens re-read at full price on the next prompt</Text>
+        <Box flexGrow={1} />
+        <Button key="band-warm2" label="Keep warm" onPress={() => void keepWarm($)} />
+      </Box>
+    ) : conf.handoff && !isWorking && ctx >= Math.max(conf.handoffAt, snooze + 10) ? (
+      <Box key="band-handoff" gap={1}>
+        <Text bold color="red">Context {ctx}%</Text>
+        <Text dimColor wrap="truncate-end">start fresh with a handoff prompt</Text>
+        <Box flexGrow={1} />
+        <Button key="band-handoff-go" label="Write handoff" onPress={() => void writeHandoff($)} />
+        <Button key="band-handoff-no" plain dimColor label="Not now" onPress={() => void update($, handoffSnooze, () => ctx)} />
+      </Box>
+    ) : ref?.state === 'open' && ref.rule ? (
+      <Box key="band-rule" gap={1}>
+        <Text bold color="magenta">✎ Save as a rule?</Text>
+        <Text italic wrap="truncate-end">„{ref.rule}”</Text>
+        <Box flexGrow={1} />
+        <Button key="band-rule-p" label="Project" onPress={() => void saveRule($, 'project')} />
+        <Button key="band-rule-a" label="Everywhere" onPress={() => void saveRule($, 'all')} />
+        <Button key="band-rule-x" plain dimColor label="✕" onPress={() => void update($, reflect, r => (r ? { ...r, state: 'skipped' as const } : r))} />
+      </Box>
+    ) : null
+
+    const pick = await read($, effortPick)
+    const effortLine = isWorking && pick && (pick.isApplied || pick.tip) && (
+      <Box key="band-effort" gap={1}>
+        <Text bold color="yellow">Effort {pick.level}</Text>
+        <Text dimColor wrap="truncate-end">for this message: {pick.why}</Text>
+        <Box flexGrow={1} />
+        {pick.isApplied && <Button key="band-lower" plain label="− lower" onPress={() => void moveEffort($, -1)} />}
+        {pick.isApplied && <Button key="band-higher" plain label="+ higher" onPress={() => void moveEffort($, 1)} />}
+        {pick.tip && <Button key="band-model" plain label={pick.tip.command} onPress={() => void fillPrompt($, pick.tip!.command, 'Press Enter to switch: it counts from your next message.')} />}
+      </Box>
+    )
+
+    return (
+      <Box flexDirection="column" width={cols}>
+        {taskLine}
+        {runStep && <Text dimColor wrap="truncate-end">{'  '}Now: {runStep.title}</Text>}
+        {offer}
+        {effortLine}
       </Box>
     )
   })

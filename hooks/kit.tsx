@@ -10,6 +10,25 @@ export const card = ({ Box }: Ui, color: string, children: any) => (
   </Box>
 )
 
+// A row of small framed numbers (the header's turn / session / context / 5h, the tabs' counts).
+export const tiles = ({ Box, Text }: Ui, key: string, items: { label: string; value: string; color?: string }[]) => (
+  <Box key={key} gap={1}>
+    {items.map(t => (
+      <Box key={`${key}-${t.label}`} flexDirection="column" flexGrow={1} borderStyle="round" borderColor="gray" paddingX={1}>
+        <Text dimColor wrap="truncate-end">{t.label}</Text>
+        <Text bold color={t.color} wrap="truncate-end">{t.value}</Text>
+      </Box>
+    ))}
+  </Box>
+)
+
+// A colored heading strip (Agents: Running, Finished, Stopped).
+export const strip = ({ Text }: Ui, key: string, color: string, text: string) => (
+  <Text key={key} bold backgroundColor={color} color={color === 'yellow' ? 'black' : 'white'}>
+    {` ${text} `}
+  </Text>
+)
+
 // "▰▰▰▱▱▱▱▱▱▱": how much of the whole is done (or healthy), at a glance.
 export const bar = ({ Text }: Ui, part: number, whole: number) => {
   const n = whole ? Math.round((part / whole) * 10) : 0
