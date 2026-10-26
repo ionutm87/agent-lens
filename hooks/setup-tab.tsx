@@ -9,7 +9,13 @@ type Ui = { Box: any; Text: any; Button: any; Svg?: any }
 // `hotkey` may come from register.tsx; rows inside a tab draw none.
 export type Switch = { key: string; label: string; on: boolean; from: string; hotkey?: string; value?: string }
 type Data = { switches: Switch[]; setup: Setup; plugins: PluginRow[]; hooks: string; style: string; fold: Fold }
-type Acts = { flip: (key: string) => void; next: (key: keyof Setup) => void; plugin: (id: string) => void; hooks: () => void; styles: () => void }
+type Acts = { flip: (key: string) => void; next: (key: keyof Setup) => void; plugin: (id: string) => void; hooks: () => void; styles: () => void; command: (name: string) => void }
+
+// The slash commands Agent Lens registers: always on, a press puts one in the prompt box.
+const COMMANDS = [
+  ['replay', "/replay last turn's edits", 'replay-theater'],
+  ['lens', '/lens open the sidebar', 'agent-lens'],
+] as const
 
 // The desktop's switch: a 26×14 pill, green with the knob right when on, gray with the knob left when off.
 const pill = (on: boolean) =>
@@ -60,7 +66,7 @@ export const setupView = (ui: Ui, d: Data, act: Acts) => {
           </Box>
           <Text size="footnote">
             <Text color="green">{onN} on</Text>
-            <Text dimColor> · {d.switches.length - onN} off · {d.plugins.length} plugins</Text>
+            <Text dimColor> · {d.switches.length - onN} off · {d.plugins.length} other mods</Text>
           </Text>
         </>,
       )}
@@ -69,6 +75,22 @@ export const setupView = (ui: Ui, d: Data, act: Acts) => {
           {d.switches.map(s => switchRow(`sw-${s.key}`, s.on, s.value ? `${s.label} · ${s.value}` : s.label, s.from, () => act.flip(s.key)))}
         </Box>
       ), <Text dimColor size="caption">was a separate mod</Text>)}
+      {section(ui, d.fold, 'set-cmds', 'Commands', true, () => (
+        <Box flexDirection="column">
+          {COMMANDS.map(([name, label, from]) => goRow(`cmd-${name}`, label, from, () => act.command(`/${name}`)))}
+        </Box>
+      ), <Text dimColor size="caption">stay as /commands</Text>)}
+      {d.plugins.length > 0 &&
+        section(ui, d.fold, 'set-plugins', 'Other mods', true, () => (
+          <Box flexDirection="column">
+            {d.plugins.map(p => {
+              const [name = p.id, market = ''] = p.id.split('@')
+
+              return switchRow(`pl-${p.id}`, p.on, name, market, () => act.plugin(p.id))
+            })}
+            <Text dimColor size="caption" wrap="wrap">counts after /reload-plugins</Text>
+          </Box>
+        ), <Text dimColor size="caption">found in settings.json · {d.plugins.filter(p => p.on).length} on</Text>)}
       {section(ui, d.fold, 'set-limits', 'Thresholds', true, () => (
         <Box flexDirection="column">
           {THRESHOLDS.map(([key, label, value]) => (
@@ -77,19 +99,12 @@ export const setupView = (ui: Ui, d: Data, act: Acts) => {
               <Text weight="bold" tabular>{value}</Text>
             </Box>
           ))}
+          <Box key="row-th-rule" justifyContent="space-between" gap={1}>
+            <Text>a rule is saved to</Text>
+            <Text weight="bold">ask: everywhere · this project</Text>
+          </Box>
         </Box>
       ), <Text dimColor size="caption">press a row for the next value</Text>)}
-      {d.plugins.length > 0 &&
-        section(ui, d.fold, 'set-plugins', 'Other plugins', false, () => (
-          <Box flexDirection="column">
-            {d.plugins.map(p => {
-              const [name = p.id, market = ''] = p.id.split('@')
-
-              return switchRow(`pl-${p.id}`, p.on, name, market, () => act.plugin(p.id))
-            })}
-            <Text dimColor size="caption" wrap="wrap">settings.json enabledPlugins · counts after /reload-plugins</Text>
-          </Box>
-        ), <Text dimColor size="caption">{d.plugins.filter(p => p.on).length} on</Text>)}
       {goRow('setup-hooks', '▸ Hooks', d.hooks, act.hooks)}
       {goRow('setup-styles', '▸ Output styles', d.style, act.styles)}
     </Box>

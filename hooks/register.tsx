@@ -1354,9 +1354,7 @@ export const register: Register = on => {
       <Box flexDirection="column" borderStyle="round" borderColor={C.accent} paddingX={1}>
         <Box justifyContent="space-between">
           <Text wrap="truncate-end">
-            <Text weight="bold" color={C.accent}>◆ AGENT LENS </Text>
-            <Text size="footnote" color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
-            {last?.effort && <Text size="footnote" color={C.info}> {last.effort}</Text>}
+            <Text weight="bold" color={C.accent}>◆ AGENT LENS</Text>
           </Text>
           <Box gap={1}>
             <Text color={running ? C.run : C.ok}>{running ? `● ${running} worker${running > 1 ? 's' : ''}` : '○ idle'}</Text>
@@ -2135,7 +2133,7 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1} minHeight={e.props.scroll.bodyRows}>
         {header}
         {tabs}
-        {current === 'think' ? (stepDetail || thinkView) : current === 'agents' ? agentsView(ui, { workers: allWorkers, steps: allSteps, now, fold, short, k, usd }) : current === 'chat' ? chatView(ui, { counts, skills: used, files: await read($, files), edits: await read($, edits), editIdx: await read($, editIdx), plan: planNow, fold }, { step: by => void stepEdit($, by), replay: () => void replayEdits($) }) : current === 'setup' ? setupView(ui, { switches: switchesNow, setup: setupNow, plugins: await read($, plugins), hooks: hooksSummary, style: (await read($, styleActive)) || '—', fold }, { flip: key => void flipSwitch(key), next: key => void nextThreshold($, key), plugin: id => void flipPlugin($, id), hooks: () => { void update($, tab, () => 'hooks' as Tab); void loadHooks($) }, styles: () => { void update($, tab, () => 'styles' as Tab); void loadStyles($) } }) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
+        {current === 'think' ? (stepDetail || thinkView) : current === 'agents' ? agentsView(ui, { workers: allWorkers, steps: allSteps, now, fold, short, k, usd }) : current === 'chat' ? chatView(ui, { counts, skills: used, files: await read($, files), edits: await read($, edits), editIdx: await read($, editIdx), plan: planNow, fold }, { step: by => void stepEdit($, by), replay: () => void replayEdits($) }) : current === 'setup' ? setupView(ui, { switches: switchesNow, setup: setupNow, plugins: await read($, plugins), hooks: hooksSummary, style: (await read($, styleActive)) || '—', fold }, { flip: key => void flipSwitch(key), next: key => void nextThreshold($, key), plugin: id => void flipPlugin($, id), hooks: () => { void update($, tab, () => 'hooks' as Tab); void loadHooks($) }, styles: () => { void update($, tab, () => 'styles' as Tab); void loadStyles($) }, command: name => void fillPrompt($, name, 'Press Enter to run it.') }) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
                   $.ui.resolve(e),
                   { list: await read($, styles), active: await read($, styleActive), draft: await read($, styleDraft), fresh: await read($, styleFresh), note: await read($, styleNote), loaded: await read($, styleLoaded), fold },
                   {
@@ -2212,11 +2210,32 @@ export const register: Register = on => {
     const barW = Math.max(120, Math.min(360, Math.round(e.props.bodyColumns * 2.4)))
     const ctxColor = ctx >= conf.handoffAt ? 'red' : ctx >= conf.handoffAt - 20 ? 'yellow' : 'green'
     const cacheColor = left === 0 ? 'red' : left !== null && left <= conf.cacheWarnS * 1000 ? 'yellow' : 'blue'
+    // The Bands board's tones: [border, ground, text] on the desktop; the terminal keeps the color name.
+    const TONE = {
+      blue: ['#bfdbfe', '#ffffff', '#1d4ed8'],
+      yellow: ['#fde68a', '#fffbeb', '#a16207'],
+      orange: ['#fed7aa', '#fff7ed', '#c2410c'],
+      magenta: ['#f5d0fe', '#fdf4ff', '#a21caf'],
+      gray: ['#e7e5e4', '#ffffff', '#c2410c'],
+      green: ['#bbf7d0', '#EEF8F0', '#15803d'],
+      red: ['#fecaca', '#fef2f2', '#b91c1c'],
+    } as const
+    const term = { orange: 'red', gray: 'gray' } as Record<string, string>
+    const ink = (tone: keyof typeof TONE) => (Svg ? TONE[tone][2] : term[tone] ?? tone)
+    // A chip: on the desktop a tinted pill (cache, ctx), on the terminal colored text.
+    const chip = (key: string, tone: keyof typeof TONE, text: string) =>
+      Svg ? (
+        <Box key={key} backgroundColor={tone === 'blue' ? '#EFF4FF' : TONE[tone][1]} paddingX={1}>
+          <Text color={ink(tone)} size="footnote" tabular wrap="truncate-end">{text}</Text>
+        </Box>
+      ) : (
+        <Text key={key} color={tone} size="footnote" tabular wrap="truncate-end">{text}</Text>
+      )
 
     // Each piece keeps its own line: the title gives way first, the chips never wrap.
     const taskLine = (
       <Box key="band-task" gap={1} alignItems="center">
-        <Text color="magenta">●</Text>
+        <Text color={Svg ? '#6d28d9' : 'magenta'}>●</Text>
         <Box flexShrink={1}>
           <Text weight="semibold" wrap="truncate-end">{title}</Text>
         </Box>
@@ -2235,12 +2254,10 @@ export const register: Register = on => {
         )}
         <Box flexGrow={1} />
         <Box flexShrink={0} gap={1} alignItems="center">
-          {conf.cache && isWorking && <Text color="blue" size="footnote" wrap="truncate-end">◔ cache warm</Text>}
-          {conf.cache && !isWorking && left !== null && (
-            <Text color={cacheColor} size="footnote" tabular wrap="truncate-end">{left === 0 ? '◌ cache cold' : `◔ cache ${mmss(left)}`}</Text>
-          )}
+          {conf.cache && isWorking && chip('band-cache-chip', 'blue', '◔ cache warm')}
+          {conf.cache && !isWorking && left !== null && chip('band-cache-chip', cacheColor, left === 0 ? '◌ cache cold' : `◔ cache ${mmss(left)}`)}
           {conf.cache && !isWorking && left !== null && left > 0 && <Button key="band-warm" plain label="keep warm" onPress={() => void keepWarm($)} />}
-          <Text color={ctxColor} size="footnote" tabular wrap="truncate-end">ctx {ctx}%</Text>
+          {chip('band-ctx', ctxColor, `ctx ${ctx}%`)}
           <Button key="band-hide" plain dimColor label="✕" onPress={() => void update($, bandHidden, () => true)} />
         </Box>
       </Box>
@@ -2253,14 +2270,14 @@ export const register: Register = on => {
     const finished = check?.better || planNow?.betterPrompt || ''
     const ref = await read($, reflect)
     const snooze = await read($, handoffSnooze)
-    const frame = (key: string, color: string, children: RenderChildren, column = false) => (
-      <Box key={key} borderStyle="round" borderColor={color} paddingX={1} gap={1} flexDirection={column ? 'column' : 'row'} alignItems={column ? undefined : 'center'}>
+    const frame = (key: string, tone: keyof typeof TONE, children: RenderChildren, column = false) => (
+      <Box key={key} borderStyle="round" borderColor={Svg ? TONE[tone][0] : term[tone] ?? tone} backgroundColor={Svg ? TONE[tone][1] : undefined} paddingX={1} gap={1} flexDirection={column ? 'column' : 'row'} alignItems={column ? undefined : 'center'}>
         {children}
       </Box>
     )
-    const lead = (color: string, text: string) => (
+    const lead = (tone: keyof typeof TONE, text: string) => (
       <Box flexShrink={0}>
-        <Text weight="semibold" color={color}>{text}</Text>
+        <Text weight="semibold" color={ink(tone)}>{text}</Text>
       </Box>
     )
     const note = (text: string, italic = false) => (
@@ -2274,7 +2291,7 @@ export const register: Register = on => {
           'blue',
           <>
             <Box justifyContent="space-between">
-              <Text weight="semibold" color="blue">Long prompt held{openQ.length ? ` · ${openQ.length} gap${openQ.length > 1 ? 's' : ''}` : ''}</Text>
+              <Text weight="semibold" color={ink('blue')}>Long, loose prompt{openQ.length ? ` · ${openQ.length} gap${openQ.length > 1 ? 's' : ''}` : ''}</Text>
               <Text dimColor size="footnote">{check?.running ? 'haiku is reading it…' : check && !check.note ? `clarity ${check.clarity}/10` : ''}</Text>
             </Box>
             {openQ.slice(0, 2).map((q, i) => (
@@ -2306,9 +2323,9 @@ export const register: Register = on => {
           : conf.handoff && !isWorking && ctx >= Math.max(conf.handoffAt, snooze + 10)
             ? frame(
                 'band-handoff',
-                'red',
+                'orange',
                 <>
-                  {lead('red', `Context ${ctx}%`)}
+                  {lead('orange', `Context ${ctx}%`)}
                   {note('start fresh with a handoff prompt: plan, decisions, open files')}
                   <Box flexGrow={1} />
                   <Button key="band-handoff-go" label="Write handoff" variant="primary" onPress={() => void writeHandoff($)} />
@@ -2339,7 +2356,7 @@ export const register: Register = on => {
         'band-effort',
         'gray',
         <>
-          {lead('yellow', `Effort ${pick.level}`)}
+          {lead('gray', `Effort ${pick.level}`)}
           {note(`for this message: ${pick.why}`)}
           <Box flexGrow={1} />
           {pick.isApplied && <Button key="band-lower" label="− Lower" onPress={() => void moveEffort($, -1)} />}

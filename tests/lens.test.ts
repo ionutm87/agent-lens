@@ -38,7 +38,8 @@ test('the sidebar renders and the tabs switch', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'agent-lens', surface, ...PANE })
     expect(await ui.find({ type: 'Text', text: /AGENT LENS/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /opus-5-5/ })).toBeDefined()
+    // The header names no model: the app's own bar shows it, as in the mockup.
+    expect(await ui.find({ type: 'Text', text: /opus-5-5/ })).toBeUndefined()
     await ui.press({ key: 'tab-changes' })
     expect(await ui.find({ type: 'Text', text: /Not a git repository|Reading status|nothing to commit|staged/ })).toBeDefined()
     await ui.press({ key: 'tab-styles' })

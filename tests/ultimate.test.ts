@@ -68,7 +68,7 @@ test('Agents, Chat and Setup tabs render on both surfaces', { timeoutMs: 30000 }
     expect(await ui.find({ type: 'Button', key: 'sw-reflect' }), 'a5').toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'th-handoffAt' }), 'a6').toBeDefined()
     await ui.press({ key: 'th-handoffAt' })
-    if (surface === 'terminal') await ui.press({ key: 'fold-set-plugins' })
+    expect(await ui.find({ type: 'Button', key: 'cmd-replay' }), 'a7').toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'pl-ponytail@ponytail' }), 'a8').toBeDefined()
     await ui.press({ key: 'th-handoffAt' })
     await ui.press({ key: 'th-handoffAt' })
