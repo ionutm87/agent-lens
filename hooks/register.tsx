@@ -2005,17 +2005,21 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         {card(
           { Box, Text, Button },
-          list.length ? C.run : C.ok,
+          'green',
           <>
-            <Text wrap="truncate-end">
-              <Text color={C.info}>⑂ {branch.name || '—'}</Text>
-              {branch.sync && <Text color={C.run}> {branch.sync}</Text>}
-              <Text dimColor> · </Text>
-              {list.length ? <Text>{stagedN} of {list.length} files staged</Text> : <Text color={C.ok}>✓ nothing to commit</Text>}
-            </Text>
-            {!repoNow.loaded && <Text dimColor>Reading status…</Text>}
-            {repoNow.loaded && !repoNow.top && <Text dimColor>Not a git repository.</Text>}
-            {repoNow.top !== '' && <Text dimColor>[ ] stage · [x] staged · [~] partly · press a name for its diff</Text>}
+            <Box justifyContent="space-between">
+              <Text weight="semibold" color="green" wrap="truncate-end">⑂ {branch.name || '—'}</Text>
+              <Text dimColor size="caption">{branch.sync || (list.length ? '' : '✓ nothing to commit')}</Text>
+            </Box>
+            {!repoNow.loaded && <Text dimColor size="footnote">Reading status…</Text>}
+            {repoNow.loaded && !repoNow.top && <Text dimColor size="footnote">Not a git repository.</Text>}
+            {repoNow.top !== '' &&
+              tiles({ Box, Text, Button }, 'git-tiles', [
+                { label: 'changed', value: String(list.length) },
+                { label: 'staged', value: String(stagedN), color: stagedN ? C.ok : undefined },
+                { label: 'added', value: `+${list.reduce((n, c) => n + c.add, 0)}`, color: C.ok },
+                { label: 'removed', value: `-${list.reduce((n, c) => n + c.del, 0)}`, color: C.bad },
+              ])}
           </>,
         )}
         {list.length > 0 &&
@@ -2025,23 +2029,25 @@ export const register: Register = on => {
                 const slash = c.path.lastIndexOf('/')
 
                 return (
-                  <Box key={`ch-${c.path}`} gap={1}>
+                  <Box key={`ch-${c.path}`} gap={1} alignItems="center">
                     <Button
                       key={`st-${c.path}`}
                       plain
                       label={c.staged && c.unstaged ? '[~]' : c.staged ? '[x]' : '[ ]'}
                       onPress={() => void gitAct($, top => (c.staged && !c.unstaged ? unstage($, top, [c.path]) : stage($, top, [c.path])))}
                     />
-                    <Text color={codeColor(c.code)} bold>{c.code}</Text>
-                    <Text wrap="truncate-start" dimColor>{slash >= 0 ? c.path.slice(0, slash + 1) : ''}</Text>
+                    <Text mono size="footnote" color={codeColor(c.code)} bold>{c.code}</Text>
                     <Button key={`df-${c.path}`} plain label={c.path.slice(slash + 1)} onPress={() => void openDiff($, c)} />
-                    {c.code === '?' ? <Text color={C.ok}>new</Text> : <Text><Text color={C.ok}>+{c.add}</Text> <Text color={C.bad}>-{c.del}</Text></Text>}
+                    <Box flexGrow={1} flexShrink={1}>
+                      <Text mono size="footnote" wrap="truncate-start" dimColor>{slash >= 0 ? c.path.slice(0, slash) : ''}</Text>
+                    </Box>
+                    {c.code === '?' ? <Text mono size="footnote" color={C.ok}>new</Text> : <Text mono size="footnote" tabular><Text color={C.ok}>+{c.add}</Text> <Text color={C.bad}>-{c.del}</Text></Text>}
                   </Box>
                 )
               })}
-              {list.length > Math.max(4, room - 8) && <Text dimColor>… +{list.length - Math.max(4, room - 8)} files (use [stage all])</Text>}
+              {list.length > Math.max(4, room - 8) && <Text mono size="footnote" dimColor>… {list.length - Math.max(4, room - 8)} more (use stage all)</Text>}
             </Box>
-          ), <Text dimColor>{stagedN}/{list.length} staged</Text>)}
+          ), <Text dimColor size="caption">{stagedN}/{list.length} staged · press a name for its diff</Text>)}
       </Box>
     )
 
@@ -2244,7 +2250,6 @@ export const register: Register = on => {
     const check = await read($, promptCheck)
     const answered = await read($, answers)
     const openQ = [...(check?.questions ?? []), ...(planNow?.questions ?? [])].filter((q, i, all) => all.findIndex(x => x.ask === q.ask) === i && (answered[q.ask]?.state ?? 'draft') === 'draft')
-    const firstQ = openQ[0]
     const finished = check?.better || planNow?.betterPrompt || ''
     const ref = await read($, reflect)
     const snooze = await read($, handoffSnooze)
@@ -2287,20 +2292,7 @@ export const register: Register = on => {
           </>,
           true,
         )
-      : firstQ && isWorking
-        ? frame(
-            'band-ask',
-            'blue',
-            <>
-              {lead('blue', '?')}
-              {note(firstQ.ask)}
-              <Box flexGrow={1} />
-              {firstQ.options.slice(0, 3).map((o, oi) => (
-                <Button key={`band-a-${oi}`} label={`${o}${oi === 0 ? ' ★' : ''}`} variant={oi === 0 ? 'primary' : 'secondary'} onPress={() => void answer($, firstQ.ask, o)} />
-              ))}
-            </>,
-          )
-        : left !== null && left > 0 && left <= conf.cacheWarnS * 1000
+      : left !== null && left > 0 && left <= conf.cacheWarnS * 1000
           ? frame(
               'band-cache',
               'yellow',

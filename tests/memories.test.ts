@@ -91,8 +91,9 @@ test('Memories tab: the graph, the index in context and memory neighbors', async
   expect(await ui.find({ type: 'Text', text: /Not analyzed yet/ })).toBeDefined()
   // "analyze": Sonnet's verdicts land on the nodes, the flagged one shows its why instead of its description.
   await ui.press({ key: 'mem-analyze' })
-  expect(await ui.find({ type: 'Text', text: /◐ 1 to look at/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /✗ 1 to delete/ })).toBeDefined()
+  // The card's tiles: one to look at, one to delete.
+  expect(await ui.find({ type: 'Text', text: '1', color: 'yellow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '1', color: 'red' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /livrat deja/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /names gone code/ })).toBeDefined()
   await ui.press({ key: 'mo-a' })

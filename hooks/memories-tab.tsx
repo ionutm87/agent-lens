@@ -1,6 +1,6 @@
 import type { Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView } from '../types'
 import { backlinks, isolated } from './memories'
-import { bar, card, needsYou, section } from './kit'
+import { card, needsYou, section, tiles } from './kit'
 import type { Fold } from './kit'
 
 // Memories tab, drawing only. Whatever touches `$` (reading the directory, tracking tools) lives in
@@ -187,14 +187,14 @@ export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold
         <Box>
           <Text color={look.color} dimColor={!look.color}>{look.mark} </Text>
           <Button key={`mo-${m.name}`} plain label={m.name} onPress={open(m.name)} />
-          <Text wrap="truncate-end">
+          <Text mono size="footnote" wrap="truncate-end">
             {inN > 0 && <Text color="cyan">{`  ←${inN}`}</Text>}
             {lonely.includes(m.name) && <Text dimColor>  isolated</Text>}
             {wrong.length > 0 && <Text color={look.color}>  {wrong.join(' · ')}</Text>}
             <Text color="green">{marks(m.name)}</Text>
           </Text>
         </Box>
-        <Text wrap="truncate-end" dimColor>
+        <Text mono size="footnote" wrap="truncate-end" dimColor>
           {'  '}
           {v(m.name) && v(m.name)!.verdict !== 'relevant' ? v(m.name)!.why : m.description || m.hook}
         </Text>
@@ -206,22 +206,21 @@ export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold
     <Box flexDirection="column" gap={1}>
       {card(
         ui,
-        count(HEALTH.drop) ? 'red' : count(HEALTH.look) ? 'yellow' : 'green',
+        'green',
         <>
           <Box justifyContent="space-between">
-            <Text wrap="truncate-end">
-              <Text bold>{list.length}</Text>
-              <Text dimColor> memories · </Text>
-              <Text color="green">✓ {count(HEALTH.ok)} fine</Text>
-              <Text color="yellow"> · ◐ {count(HEALTH.look)} to look at</Text>
-              <Text color="red"> · ✗ {count(HEALTH.drop)} to delete</Text>
-            </Text>
-            <Button key="mem-refresh" plain label="↻" onPress={act.refresh} />
+            <Text weight="semibold" color="green">Memories</Text>
+            <Box gap={1}>
+              <Text dimColor size="caption">{edges} links · {lonely.length} isolated</Text>
+              <Button key="mem-refresh" plain label="↻" onPress={act.refresh} />
+            </Box>
           </Box>
-          <Text wrap="truncate-end">
-            {bar(ui, count(HEALTH.ok), list.length)}
-            <Text dimColor> {count(HEALTH.ok)}/{list.length} healthy · {edges} links · {lonely.length} isolated</Text>
-          </Text>
+          {tiles(ui, 'mem-tiles', [
+            { label: 'memories', value: String(list.length) },
+            { label: '✓ fine', value: String(count(HEALTH.ok)), color: 'green' },
+            { label: '◐ look at', value: String(count(HEALTH.look)), color: count(HEALTH.look) ? 'yellow' : undefined },
+            { label: '✗ delete', value: String(count(HEALTH.drop)), color: count(HEALTH.drop) ? 'red' : undefined },
+          ])}
           {audit.running ? (
             <Text color="yellow" wrap="wrap">● checking {list.length} memories against the code, then Sonnet reads them with CLAUDE.md and the recent commits…</Text>
           ) : analyzed ? (
