@@ -47,7 +47,11 @@ test('the sidebar renders and the tabs switch', async ($, on) => {
     await ui.press({ key: 'tab-hooks' })
     expect(await ui.find({ type: 'Button', key: 'fold-hk-global' })).toBeDefined()
     await ui.press({ key: 'tab-think' })
+    // Nothing sent yet: Flow opens on "before"; Execution sits in "working".
+    expect(await ui.find({ type: 'Button', key: 'stage-before' })).toBeDefined()
+    await ui.press({ key: 'stage-during' })
     expect(await ui.find({ type: 'Button', key: 'fold-exec' })).toBeDefined()
+    await ui.press({ key: 'stage-before' })
     await ui.unmount()
   }
 })
@@ -102,25 +106,28 @@ test('Flow tab: the plan published through the tool renders by level', async ($,
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ plugin: 'agent-lens', surface, ...PANE })
     await ui.press({ key: 'tab-think' })
-    expect(await ui.find({ type: 'Text', text: /New tab that shows/ })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'fold-plan' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /New tab that shows/ }), "{ type: 'Text', text: /New tab that shows/ }").toBeDefined()
+    // The turn is over (a plan, not busy): Flow shows "done", the plan folded until pressed.
+    expect(await ui.find({ type: 'Text', text: /✓ done/ }), "{ type: 'Text', text: /✓ done/ }").toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'fold-plan' }), "{ type: 'Button', key: 'fold-plan' }").toBeDefined()
+    await ui.press({ key: 'fold-plan' })
     // a and b share level 1 (1a, 1b run in parallel); the now card names the step under way.
-    expect(await ui.find({ type: 'Text', text: /1b/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /read the API/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /1b/ }), "{ type: 'Text', text: /1b/ }").toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /read the API/ }), "{ type: 'Text', text: /read the API/ }").toBeDefined()
     // Steps start closed; a press on the title opens the details, another closes them.
-    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ }), "{ type: 'Text', text: /in parallel with: read the mod/ }").toBeUndefined()
     await ui.press({ key: 'fold-p-b' })
-    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ }), "{ type: 'Text', text: /in parallel with: read the mod/ }").toBeDefined()
     await ui.press({ key: 'fold-p-b' })
     // "Next time" is the last section and open.
-    expect(await ui.find({ type: 'Text', text: /Add a Flow tab to agent-lens/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Add a Flow tab to agent-lens/ }), "{ type: 'Text', text: /Add a Flow tab to agent-lens/ }").toBeDefined()
     // The open question sits in NEEDS YOU with numbered options; the step suggestion waits for a press.
-    expect(await ui.find({ type: 'Text', text: /Static or live/ })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'q-0-o-0' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'q-0-d' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'sgb-d' })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /⤷ haiku \?/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /● done/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Static or live/ }), "{ type: 'Text', text: /Static or live/ }").toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'q-0-o-0' }), "{ type: 'Button', key: 'q-0-o-0' }").toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'q-0-d' }), "{ type: 'Button', key: 'q-0-d' }").toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'sgb-d' }), "{ type: 'Button', key: 'sgb-d' }").toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /⤷ haiku \?/ }), "{ type: 'Text', text: /⤷ haiku \\?/ }").toBeDefined()
+    await ui.press({ key: 'fold-plan' })
     await ui.unmount()
   }
 })

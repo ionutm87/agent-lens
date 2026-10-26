@@ -6,11 +6,22 @@ step with each step's model, tokens and cost, and the subagent workers. Around i
 
 - **Prompt check** — at submit, Haiku reads your prompt alone and lists what is missing, up to three
   questions you answer with one click (the answers reach the model mid-turn) and the prompt rewritten.
-- **Flow** — a "now" card (the request, understand → plan → execute → done, the plan's progress and the
-  step under way), what needs you (questions with numbered options, `0` keeps the default), the plan as a
-  checklist (`1a`, `1b` run in parallel; press a step for its details), the execution one row per step,
-  and "next time, write it like this" always last. A step the model would hand to a subagent on another model shows the suggestion;
-  nothing is delegated until you press it. No model routing: the session model does the work.
+- **Flow** — three stages, only the current one open (`1 before · 2 working · 3 done`, press one to look back):
+  - *Before you send*: what you wrote, how Claude reads it (the plan's goal and assumptions, or Haiku's read),
+    the questions, the finished prompt (`put in the prompt box` / `copy`) and what it runs with: the model
+    (a `/model …` tip, filled in the box, never switched for you) and the effort for this message.
+    With **hold long prompts** on, a typed prompt of 40+ words stops once and goes back into the box, so
+    nothing is lost: `send the finished prompt`, `send mine`, or Enter sends it as is.
+  - *While it works*: the plan's progress and the step under way, NEEDS YOU, and **What Agent Lens did**: one
+    line per thing it did on its own (held the prompt, checked it, set the effort, asked for the plan, sent
+    Claude to CodeGraph, passed on your answer, a default Claude used). Plan and Execution are folded.
+  - *Done*: the goal, steps, cost, files changed, the log, "next time, write it like this", then the folded extras.
+  A step the model would hand to a subagent on another model shows the suggestion; nothing is delegated until
+  you press it.
+- **Effort per message** (`effort auto · tip · off`) — read from your words alone, free (after wearenocode's
+  Effort Picker, with Romanian words): a big handoff gets xhigh, an audit max, money, people, deploys, deletes or
+  something broken get high, a quick question low, "da" / "ok" keep your level. Auto applies it to that message
+  only; a level you set to xhigh or max is never lowered; `− lower` / `+ higher` while it works.
 - **Git** — status, stage/unstage, diff per file, a Haiku-written commit message, commit, sync.
 - **Memories** — the project's auto-memory: a health card (✓ fine / ◐ to look at / ✗ to delete), NEEDS YOU
   with one decision per row (a link to a memory that does not exist, grouped, `unlink` keeps the word; what
@@ -29,7 +40,8 @@ sections with the summary on the right.
 - **CodeGraph first** — in a project with a `.codegraph/` index, `codegraph_explore` goes before Grep/Glob.
 
 `/lens` opens the pane. Hotkeys inside it: `f` Flow, `c` Git, `e` Memories, `h` Hooks, `y` Styles,
-`k` prompt check, `n` miniplan, `g` codegraph; `1`-`4` answer the first open question, `0` keeps its default.
+`k` prompt check, `n` miniplan, `g` codegraph, `b` hold long prompts, `v` effort mode; `1`-`4` answer the
+first open question, `0` keeps its default.
 
 ## Install
 

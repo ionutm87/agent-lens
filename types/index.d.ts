@@ -99,6 +99,31 @@ export type StyleDraft = { file: string; description: string; lines: string[]; d
 // The prompt check: Haiku's read of the prompt at submit (clarity, what is missing, questions, a rewrite).
 export type PromptCheck = { at: number; running: boolean; clarity: number; missing: string[]; questions: Plan['questions']; better: string; note: string }
 
+// The effort for one message, picked from its words (hooks/effort.ts): `from` and the model tip come at the
+// turn's first step; `isApplied` = the step runs at `level` (auto mode, or Lower/Higher pressed).
+export type EffortMode = 'auto' | 'tip' | 'off'
+export type EffortPick = {
+  at: number
+  text: string
+  turnId?: string
+  level: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+  why: string
+  from?: string
+  model?: string
+  tip: { label: string; command: string; note: string } | null
+  isApplied: boolean
+  mode: EffortMode
+}
+
+// What Agent Lens did on its own this turn, one line each (Flow · While it works).
+export type Did = { at: number; mark: string; text: string; tone?: 'ok' | 'run' | 'info' | 'bad' }
+
+// A long prompt held before sending (it is also back in the prompt box, so nothing is lost).
+export type Held = { text: string; at: number }
+
+// Flow's three stages; `stageView` null = follow the turn.
+export type Stage = 'before' | 'during' | 'after'
+
 // A Claude Code hook from a settings file (global, project shared, project local); isOff = parked in the
 // sibling *.hooks-off.json, since settings have no per-hook switch.
 export type HookEntry = { type: string; timeout?: number; [key: string]: unknown }
@@ -154,6 +179,13 @@ declare module 'claude-code' {
       hookNote: string
       hooksLoaded: boolean
       hookPaths: HookPaths
+      effortMode: EffortMode
+      effortPick: EffortPick | null
+      did: Did[]
+      held: Held | null
+      released: string
+      holdOn: boolean
+      stageView: Stage | null
     }
   }
 }

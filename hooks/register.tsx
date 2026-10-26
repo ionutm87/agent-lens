@@ -1,7 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { Engine, HookFor, Register, RenderChildren } from 'claude-code'
 
-import type { Answer, Change, Diff, GitNote, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PromptCheck, Repo, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
+import type { Answer, Change, Did, Diff, EffortMode, EffortPick, GitNote, Held, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PromptCheck, Repo, Stage, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
+import { asLevel, pickFor, rank, shift, tipFor } from './effort'
 import { branchLabel, cleanMessage, clip, outcomeOf, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
 import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, delegationAsk, delegationText, layers, normalizePlan } from './plan'
 import { INDEX, memoriesView } from './memories-tab'
@@ -63,6 +64,18 @@ const hookDraft = atom({ plugin: 'agent-lens', key: 'hookDraft' } as const, null
 const hookNote = atom({ plugin: 'agent-lens', key: 'hookNote' } as const, '')
 const hooksLoaded = atom({ plugin: 'agent-lens', key: 'hooksLoaded' } as const, false)
 const hookPaths = atom({ plugin: 'agent-lens', key: 'hookPaths' } as const, { global: '', project: '', local: '' } as HookPaths)
+const effortMode = atom({ plugin: 'agent-lens', key: 'effortMode' } as const, 'auto' as EffortMode)
+const effortPick = atom({ plugin: 'agent-lens', key: 'effortPick' } as const, null as EffortPick | null)
+const did = atom({ plugin: 'agent-lens', key: 'did' } as const, [] as Did[])
+const held = atom({ plugin: 'agent-lens', key: 'held' } as const, null as Held | null)
+const released = atom({ plugin: 'agent-lens', key: 'released' } as const, '')
+const holdOn = atom({ plugin: 'agent-lens', key: 'holdOn' } as const, true)
+const stageView = atom({ plugin: 'agent-lens', key: 'stageView' } as const, null as Stage | null)
+
+// A prompt this long is held for a look before it is sent (once: Enter on the same text sends it).
+const HOLD_WORDS = 40
+// A message's effort pick waits this long for its turn, unless the turn carries the same text.
+const PICK_MS = 15_000
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 
@@ -277,7 +290,53 @@ const submitAnswers = async ($: Engine) => {
 const answer = async ($: Engine, ask: string, text: string) => {
   if (!text.trim()) return
   await update($, answers, all => ({ ...all, [ask]: { text: text.trim(), state: 'pending' as const } }))
+  await logDid($, '↳', `Passed on your answer: ${clip(ask, 60)} → ${text.trim()}`, 'info')
   if (!(await read($, busy))) await submitAnswers($)
+}
+
+// "What Agent Lens did": one line per thing the mod did on its own this turn.
+const logDid = async ($: Engine, mark: string, text: string, tone?: Did['tone']) => {
+  const at = await $.clock.now()
+  await update($, did, list => [...list, { at, mark, text, tone }].slice(-30))
+}
+
+// A held prompt goes out as the person chose: the finished one or theirs. The box is emptied first, and the
+// text is marked so the submit hook treats it as the person's own and does not hold it again.
+const sendHeld = async ($: Engine, text: string, finished: boolean) => {
+  if (!text.trim()) return
+  await update($, released, () => text)
+  await update($, held, () => null)
+  await $.prompt.fill({ text: '', mode: 'replace' }).catch(() => null)
+  await logDid($, '✓', finished ? 'Sent the finished prompt' : 'Sent your prompt as you wrote it', 'ok')
+  void $.prompt.submit({ text, asUser: true })
+}
+
+const fillPrompt = async ($: Engine, text: string, toast: string) => {
+  const r = await $.prompt.fill({ text, mode: 'replace' }).catch(() => null)
+  $.ui.toast(r?.isFilled ? toast : 'The prompt box did not take it: use [copy].')
+}
+
+// Lower / Higher: the pick moves one level and applies from the next step of the turn.
+const moveEffort = async ($: Engine, by: number) => {
+  const p = await read($, effortPick)
+  if (!p) return
+  const level = shift(p.level, by)
+  await update($, effortPick, cur => (cur ? { ...cur, level, why: 'your call', isApplied: true } : cur))
+  await logDid($, by > 0 ? '+' : '−', `Effort ${level} from the next step: your call`, 'run')
+}
+
+const flipEffortMode = async ($: Engine) => {
+  const order: EffortMode[] = ['auto', 'tip', 'off']
+  const next = order[(order.indexOf(await read($, effortMode)) + 1) % order.length]!
+  await update($, effortMode, () => next)
+  await $.store.set('effort', next)
+  if (next === 'off') await update($, effortPick, () => null)
+}
+
+const flipHold = async ($: Engine) => {
+  const isOn = !(await read($, holdOn))
+  await update($, holdOn, () => isOn)
+  await $.store.set('hold', isOn)
 }
 
 const commitStaged = async ($: Engine) => {
@@ -613,6 +672,10 @@ const runCheck = async ($: Engine, text: string, previous: string, at: number) =
     why = ` (${(err as Error).message})`
   }
   await update($, promptCheck, cur => (cur?.at !== at ? cur : (found ?? { ...cur, running: false, note: `✗ haiku gave no check${why}` })))
+  if (found && (await read($, promptCheck))?.at === at) {
+    const asks = found.questions.length ? `, ${found.questions.length} question${found.questions.length > 1 ? 's' : ''}` : ''
+    await logDid($, '✓', `Checked your prompt with Haiku: clarity ${found.clarity}/10${asks}${found.better ? ', finished it' : ''}`, 'ok')
+  }
 }
 
 const copyText = async ($: Engine, text: string, surface: any) => {
@@ -744,6 +807,32 @@ const openHook = async ($: Engine, r: HookRow | null) => {
   )
 }
 
+// The main loop's steps run at the message's picked effort. At the turn's first step the pick learns the level it
+// starts from and the model (for the tip); a level the person set to xhigh or max is never lowered.
+type StepIn = Parameters<HookFor<'turn.step'>>[1]
+const withEffort = async ($: Engine, e: StepIn): Promise<StepIn> => {
+  const from = asLevel(e.effort)
+  const p = e.agentId ? null : await read($, effortPick)
+  if (!p || p.turnId !== e.turnId || !from) return e
+  if (p.from === undefined) {
+    if (rank(from) >= rank('xhigh') && rank(p.level) < rank(from)) {
+      await update($, effortPick, () => null)
+
+      return e
+    }
+    const tip = tipFor(p.level, e.model, e.index === 0 && e.messageCount <= 2)
+    const isApplied = p.mode === 'auto'
+    await update($, effortPick, cur => (cur ? { ...cur, from, model: e.model, tip, isApplied } : cur))
+    if (p.level !== from) {
+      await logDid($, '✓', isApplied ? `Effort ${p.level} for this message (was ${from}): ${p.why}` : `Effort ${p.level} would fit (you're on ${from}): ${p.why}`, 'run')
+    }
+    await logDid($, tip ? '?' : '✓', tip ? `Model tip: ${tip.label}, ${tip.note}` : `Kept ${short(e.model)}: it fits this message`, tip ? 'info' : 'ok')
+  }
+  const now = await read($, effortPick)
+
+  return now && now.turnId === e.turnId && now.isApplied && now.level !== from ? { ...e, effort: now.level } : e
+}
+
 export const register: Register = on => {
   // Memory usage: reads and writes through tools (including subagents'), recalls through attachments.
   on('tool.call', { tool: 'Read' }, trackMemory)
@@ -772,6 +861,10 @@ export const register: Register = on => {
     // The prompt check stays on until the person turns it off.
     const check = await $.store.get('check')
     await update($, checkOn, () => check !== false)
+    const effort = await $.store.get('effort')
+    await update($, effortMode, () => (effort === 'tip' || effort === 'off' ? effort : 'auto'))
+    const hold = await $.store.get('hold')
+    await update($, holdOn, () => hold !== false)
     await update($, hasGraph, () => false)
     if (await $.fs.exists('.codegraph')) await update($, hasGraph, () => true)
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
@@ -790,8 +883,17 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
     const now = await $.clock.now()
-    const isHuman = !e.origin || e.origin.kind === 'composer' || e.origin.kind === 'bridge'
-    if (isHuman) {
+    // A held prompt sent from Flow comes back through $.prompt.submit: it is still the person's own.
+    const isReleased = e.text !== '' && e.text === (await read($, released))
+    if (isReleased) await update($, released, () => '')
+    const isTyped = !e.origin || e.origin.kind === 'composer' || e.origin.kind === 'bridge'
+    const isHuman = isTyped || isReleased
+    const heldNow = await read($, held)
+    // Enter on the text that was held sends it as is; a held prompt already had its check.
+    const wasHeld = heldNow !== null && heldNow.text === e.text
+    const previous = await read($, prompt)
+    const isFresh = isHuman && !isReleased && !wasHeld
+    if (isFresh) {
       await update($, graphSeen, () => false)
       await update($, planAsked, () => false)
       await update($, turnAt, () => now)
@@ -799,11 +901,44 @@ export const register: Register = on => {
       await update($, answers, () => ({}))
       await update($, folds, () => ({}))
       await update($, promptCheck, () => null)
+      await update($, did, () => [])
+      await update($, stageView, () => null)
     }
-    const previous = await read($, prompt)
+    // Before you send: a long typed prompt stops once, goes back into the box (nothing is lost) and Haiku reads
+    // it; Flow offers the finished prompt. If the box cannot take it back, the prompt goes out as usual.
+    const isLong = e.text.trim().split(/\s+/).length >= HOLD_WORDS
+    if (isFresh && isTyped && e.command === undefined && isLong && worthChecking(e.text) && (await read($, holdOn)) && (await read($, checkOn))) {
+      const back = await $.prompt.fill({ text: e.text, mode: 'replace' }).catch(() => null)
+      if (back?.isFilled) {
+        await update($, held, () => ({ text: e.text, at: now }))
+        await update($, prompt, () => e.text)
+        await logDid($, '⏸', 'Held your long prompt for a look before sending', 'run')
+        void runCheck($, e.text, previous, now)
+        void $.ui.open({ id: PANE, title: 'Agent Lens' })
+
+        return { drop: 'Agent Lens: held for a look first (Flow). Press Enter to send it as is.' }
+      }
+    }
+    if (wasHeld) await logDid($, '✓', 'Sent your prompt as you wrote it', 'ok')
+    if (isHuman) {
+      await update($, held, () => null)
+      // The effort for this message, from its words; it meets its turn at turn.start.
+      const mode = await read($, effortMode)
+      const pick = mode === 'off' ? null : pickFor(e.text)
+      await update($, effortPick, () => (pick ? { ...pick, at: now, text: e.text, tip: null, isApplied: false, mode } : null))
+    }
     await update($, busy, () => true)
     await update($, prompt, () => e.text)
-    if (isHuman && (await read($, checkOn)) && worthChecking(e.text)) void runCheck($, e.text, previous, now)
+    if (isFresh && (await read($, checkOn)) && worthChecking(e.text)) void runCheck($, e.text, previous, now)
+
+    return next(e)
+  })
+
+  on('turn.start', async ($, e, next) => {
+    if (!e.agentId) {
+      const now = await $.clock.now()
+      await update($, effortPick, p => (p && !p.turnId && (p.text === e.text || now - p.at <= PICK_MS) ? { ...p, turnId: e.turnId } : p))
+    }
 
     return next(e)
   })
@@ -852,12 +987,14 @@ export const register: Register = on => {
     // The miniplan comes before any tool: the first tool of a turn without a published plan is denied once.
     if (!e.agentId && String(e.tool) !== PLAN_TOOL_ID && (await read($, planFirst)) && !(await read($, plan)) && !(await read($, planAsked))) {
       await update($, planAsked, () => true)
+      await logDid($, '✓', 'Asked Claude for its plan before the first tool', 'ok')
 
       return { deny: `Publish the miniplan with ${PLAN_TOOL_ID} first: what you understood (goal) and how you will act (approach), with the steps. Then repeat the tool.` }
     }
     // The turn's first classic search, without CodeGraph before it, is denied once; the second goes through.
     if (!e.agentId && /^(Grep|Glob)$/.test(String(e.tool)) && (await read($, hasGraph)) && (await read($, graphFirst)) && !(await read($, graphSeen))) {
       await update($, graphSeen, () => true)
+      await logDid($, '✓', 'Sent Claude to CodeGraph before a plain search', 'ok')
 
       return { deny: 'The project has a CodeGraph index: start with codegraph_explore (verbatim source and callers in a single call). If it does not cover what you are looking for, repeat Grep/Glob.' }
     }
@@ -875,7 +1012,8 @@ export const register: Register = on => {
   })
 
   // Every step of the main loop and of the subagents, with its model, tools, tokens and cost.
-  on('turn.step', async function* ($, e, next) {
+  on('turn.step', async function* ($, e0, next) {
+    const e = await withEffort($, e0)
     const id = `${e.turnId}:${e.agentId ?? 'main'}:${e.index}`
     const step: Step = {
       id,
@@ -968,6 +1106,14 @@ export const register: Register = on => {
     if (!e.agentId) {
       void refreshChanges($)
       await update($, busy, () => false)
+      // Questions left unanswered: the model went with its default, said once per question.
+      const answeredNow = await read($, answers)
+      const asked = [...((await read($, promptCheck))?.questions ?? []), ...((await read($, plan))?.questions ?? [])]
+      const logged = new Set((await read($, did)).map(d => d.text))
+      for (const q of asked.filter((q, i) => !answeredNow[q.ask] && asked.findIndex(x => x.ask === q.ask) === i && q.fallback !== '')) {
+        const text = `No answer to „${clip(q.ask, 50)}”: Claude went with ${q.fallback}`
+        if (!logged.has(text)) await logDid($, '·', text)
+      }
       await submitAnswers($)
     }
 
@@ -1022,6 +1168,12 @@ export const register: Register = on => {
     const isChecking = await read($, checkOn)
     const checkNow = await read($, promptCheck)
     const since = await read($, turnAt)
+    const effortNow = await read($, effortPick)
+    const effortModeNow = await read($, effortMode)
+    const didNow = await read($, did)
+    const heldNow = await read($, held)
+    const isHolding = await read($, holdOn)
+    const stageNow = await read($, stageView)
     const { context, rateLimits } = await $.session.usage()
     const now = await $.clock.now()
     const room = Math.max(6, (e.viewport?.rows ?? 30) - 12)
@@ -1081,6 +1233,10 @@ export const register: Register = on => {
           <Button key="planfirst" plain dimColor={!isPlanFirst} label={`${isPlanFirst ? '✓' : '○'} miniplan`} hotkey="n" onPress={() => update($, planFirst, v => !v)} />
           <Button key="check" plain dimColor={!isChecking} label={`${isChecking ? '✓' : '○'} prompt check`} hotkey="k" onPress={() => void flipCheck($)} />
           {graphReady && <Button key="graph" plain dimColor={!isGraphFirst} label={`${isGraphFirst ? '✓' : '○'} graph first`} hotkey="g" onPress={() => update($, graphFirst, v => !v)} />}
+        </Box>
+        <Box gap={1}>
+          <Button key="hold" plain dimColor={!isHolding} label={`${isHolding ? '✓' : '○'} hold long prompts`} hotkey="b" onPress={() => void flipHold($)} />
+          <Button key="effort-mode" plain dimColor={effortModeNow === 'off'} label={`${effortModeNow === 'off' ? '○' : '✓'} effort ${effortModeNow}`} hotkey="v" onPress={() => void flipEffortMode($)} />
         </Box>
       </Box>
     )
@@ -1156,46 +1312,17 @@ export const register: Register = on => {
     // Where the turn is: understanding (no plan yet), planning (plan, no tool after it), executing, done.
     const execN = turnSteps.filter(s => !s.agentId && s.tools.some(t => t !== 'agent-lens:plan')).length
     const phase = !isBusy && !planNow && turnSteps.length === 0 ? 'idle' : !planNow ? 'understand' : isBusy ? (execN ? 'execute' : 'plan') : 'done'
-    const PHASES = ['understand', 'plan', 'execute', 'done'] as const
-    const phaseAt = PHASES.indexOf(phase as (typeof PHASES)[number])
-
-    const phaseLine = (
-      <Text wrap="truncate-end">
-        {PHASES.map((name, i) => (
-          <Text key={`phase-${name}`}>
-            {i > 0 && <Text dimColor> → </Text>}
-            <Text color={i < phaseAt ? C.ok : i === phaseAt ? C.run : undefined} dimColor={i > phaseAt || phase === 'idle'} bold={i === phaseAt}>
-              {i < phaseAt ? '✓' : i === phaseAt ? '●' : '○'} {name}
-            </Text>
-          </Text>
-        ))}
-      </Text>
-    )
-
-    // Where the turn is, at a glance: the request, the stage and the plan's progress with the step under way.
+    // The plan's progress and the step under way, on one line.
     const runningStep = planNow?.steps.find(s => s.status === 'run')
     const total = planNow?.steps.length ?? 0
     const filled = total ? Math.round((doneN / total) * 10) : 0
-    const nowCard = (
-      <Box flexDirection="column" borderStyle="round" borderColor={phase === 'done' ? C.ok : phase === 'idle' ? C.info : C.run} borderDimColor={phase === 'idle'} paddingX={1}>
-        {lastPrompt !== '' ? (
-          <Text wrap="truncate-end">
-            <Text color={C.accent}>▸ </Text>
-            <Text italic>{lastPrompt.replace(/\s+/g, ' ')}</Text>
-          </Text>
-        ) : (
-          <Text dimColor>Send a prompt: the plan shows up here first.</Text>
-        )}
-        {phaseLine}
-        {total > 0 && (
-          <Text wrap="truncate-end">
-            <Text color={C.ok}>{'▰'.repeat(filled)}</Text>
-            <Text dimColor>{'▱'.repeat(10 - filled)} {doneN}/{total}</Text>
-            {runningStep && <Text dimColor> · now </Text>}
-            {runningStep && <Text color={C.run}>{runningStep.title}</Text>}
-          </Text>
-        )}
-      </Box>
+    const progress = total > 0 && (
+      <Text wrap="truncate-end">
+        <Text color={C.ok}>{'▰'.repeat(filled)}</Text>
+        <Text dimColor>{'▱'.repeat(10 - filled)} {doneN}/{total}</Text>
+        {runningStep && <Text dimColor> · now </Text>}
+        {runningStep && <Text color={C.run}>{runningStep.title}</Text>}
+      </Text>
     )
 
     // A plan step as a checklist row: the level (1a, 1b = same level, run in parallel), the mark, the title.
@@ -1389,129 +1516,265 @@ export const register: Register = on => {
     const answeredQ = questions.filter(q => !isOpenQ(q.ask))
     const otherTiers = planNow?.steps.some(s => s.tier && s.tier !== sessionTier)
 
-    // Top to bottom: where the turn is, what needs the person, how the model read the request, the plan as a
-    // checklist, what ran; then the folded extras, and "next time" always last.
-    const thinkView = (
-      <Box flexDirection="column" gap={1}>
-        {nowCard}
-        {(openQ.length > 0 || suggested.length > 0) && (
-          <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1}>
-            <Text bold color={C.info}>
-              NEEDS YOU{' '}
-              <Text dimColor>
-                {[openQ.length ? `${openQ.length} question${openQ.length > 1 ? 's' : ''}` : '', suggested.length ? `${suggested.length} delegation${suggested.length > 1 ? 's' : ''} to confirm` : ''].filter(Boolean).join(' · ')}
-              </Text>
+    // Flow in three stages, only one open: before you send (how Claude reads the prompt, what to settle, the
+    // finished prompt, the model and effort), while it works (progress, what needs you, what Agent Lens did on its
+    // own) and when it is done (the summary, next time). A press on a stage shows it; a new prompt follows the turn.
+    const autoStage: Stage = heldNow || phase === 'idle' || phase === 'understand' ? 'before' : phase === 'done' ? 'after' : 'during'
+    const stageShown = stageNow ?? autoStage
+    const STAGES = [
+      ['before', '1 before'],
+      ['during', '2 working'],
+      ['after', '3 done'],
+    ] as const
+    const stageTabs = (
+      <Box gap={2}>
+        {STAGES.map(([id, name]) => (
+          <Button key={`stage-${id}`} plain dimColor={stageShown !== id} label={stageShown === id ? `[${name}]` : name} onPress={() => void update($, stageView, () => (id === autoStage ? null : id))} />
+        ))}
+      </Box>
+    )
+    const label = (text: string) => (
+      <Text dimColor bold>
+        {text}
+      </Text>
+    )
+
+    // What needs the person: the open questions first (the first takes the digit hotkeys), then, once there is a
+    // plan, the step suggestions to confirm.
+    const needsYou = (withDelegations: boolean) => {
+      const asks = withDelegations ? suggested : []
+      if (!openQ.length && !asks.length) return null
+
+      return (
+        <Box flexDirection="column" borderStyle="round" borderColor={C.info} paddingX={1}>
+          <Text bold color={C.info}>
+            NEEDS YOU{' '}
+            <Text dimColor>
+              {[openQ.length ? `${openQ.length} question${openQ.length > 1 ? 's' : ''}` : '', asks.length ? `${asks.length} delegation${asks.length > 1 ? 's' : ''} to confirm` : ''].filter(Boolean).join(' · ')}
             </Text>
-            {openQ.map((q, i) => questionRow('q', q, i, i === 0))}
-            {suggested.map((s, i) => (
-              <Box key={`sg-${s.id}`} marginTop={openQ.length || i ? 1 : 0}>
-                <Text wrap="truncate-end">
-                  <Text color={TIER_COLOR[s.tier ?? 'opus']}>⤷ </Text>
-                  {s.title}
-                  <Text dimColor> → {s.tier}{s.why !== '' ? ` · ${s.why}` : ''} </Text>
-                </Text>
-                <Button key={`sgb-${s.id}`} plain label={`[delegate]`} onPress={() => void answer($, delegationAsk(s), delegationText(s))} />
-              </Box>
-            ))}
-            <Text dimColor>{openQ.length ? '1-4 pick · 0 keeps the default · ' : ''}unanswered = the model goes with its default</Text>
+          </Text>
+          {openQ.map((q, i) => questionRow('q', q, i, i === 0))}
+          {asks.map((s, i) => (
+            <Box key={`sg-${s.id}`} marginTop={openQ.length || i ? 1 : 0}>
+              <Text wrap="truncate-end">
+                <Text color={TIER_COLOR[s.tier ?? 'opus']}>⤷ </Text>
+                {s.title}
+                <Text dimColor> → {s.tier}{s.why !== '' ? ` · ${s.why}` : ''} </Text>
+              </Text>
+              <Button key={`sgb-${s.id}`} plain label={`[delegate]`} onPress={() => void answer($, delegationAsk(s), delegationText(s))} />
+            </Box>
+          ))}
+          <Text dimColor>{openQ.length ? '1-4 pick · 0 keeps the default · ' : ''}unanswered = the model goes with its default</Text>
+        </Box>
+      )
+    }
+
+    // The effort for this message and the model: the pick of the running turn, or for a held prompt what it would be.
+    const preview = heldNow ? pickFor(heldNow.text) : null
+    const shown = effortNow
+      ? { level: effortNow.level, why: effortNow.why, from: effortNow.from, tip: effortNow.tip, isApplied: effortNow.isApplied }
+      : preview && effortModeNow !== 'off'
+        ? { level: preview.level, why: preview.why, from: undefined, tip: tipFor(preview.level, String(sessionModel ?? ''), sum.steps === 0), isApplied: false }
+        : null
+    const effortButtons = effortNow && isBusy && (
+      <Box gap={1}>
+        <Text dimColor>{'      '}</Text>
+        <Button key="effort-lower" plain label="[− lower]" onPress={() => void moveEffort($, -1)} />
+        <Button key="effort-higher" plain label="[+ higher]" onPress={() => void moveEffort($, 1)} />
+      </Box>
+    )
+    const effortRow = (
+      <Box flexDirection="column">
+        <Text wrap="wrap">
+          <Text dimColor>effort </Text>
+          {shown ? <Text bold color={C.run}>{shown.level}</Text> : <Text>your level</Text>}
+          {shown?.from && shown.from !== shown.level && <Text dimColor> (was {shown.from})</Text>}
+          <Text dimColor>{shown ? ` · ${shown.why}${shown.isApplied ? '' : effortModeNow === 'tip' ? ' · tip only' : heldNow ? ' · set when sent' : ''}` : effortModeNow === 'off' ? ' · effort picker off' : ' · nothing in the words moves it'}</Text>
+        </Text>
+        {effortButtons}
+      </Box>
+    )
+    const tip = shown?.tip
+    const modelRow = (
+      <Box flexDirection="column">
+        <Text wrap="truncate-end">
+          <Text dimColor>model  </Text>
+          <Text bold color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
+          {!tip && <Text color={C.ok}> ✓ fits</Text>}
+        </Text>
+        {tip && (
+          <Box>
+            <Text color={C.info} wrap="truncate-end">
+              {'       '}⤷ {tip.note}{' '}
+            </Text>
+            <Button key="model-tip" plain label={`[${tip.command}]`} onPress={() => void fillPrompt($, tip.command, 'Press Enter to switch: it counts from your next message.')} />
           </Box>
         )}
-        {checkNow &&
-          section(
-            'check',
-            'Prompt check',
-            !planNow,
-            () => (
-              <Box flexDirection="column">
-                {checkNow.running && <Text color={C.run}>● haiku is reading your prompt…</Text>}
-                {checkNow.note !== '' && <Text wrap="wrap" dimColor>{checkNow.note}</Text>}
-                {!checkNow.running && checkNow.note === '' && (
-                  <Box flexDirection="column">
-                    {checkNow.missing.length === 0 && checkNow.questions.length === 0 && <Text color={C.ok}>✓ nothing important missing</Text>}
-                    {checkNow.missing.map((m, i) => (
-                      <Text key={`cm-${i}`} wrap="wrap">
-                        <Text color={C.run}>– </Text>
-                        {m}
-                      </Text>
-                    ))}
-                    {checkNow.better !== '' && betterRow('cbetter', checkNow.better, 1)}
-                  </Box>
-                )}
-              </Box>
-            ),
-            checkNow.running ? (
-              <Text color={C.run}>…</Text>
-            ) : checkNow.note ? (
-              <Text color={C.bad}>✗</Text>
-            ) : (
-              <Text color={clarityColor(checkNow.clarity)}>clarity {checkNow.clarity}/10</Text>
-            ),
-          )}
-        {!planNow && phase !== 'idle' && <Text dimColor>● the model is reading the request; its plan lands here first.</Text>}
-        {planNow &&
-          section(
-            'goal',
-            'Understanding',
-            true,
-            () => (
-              <Box flexDirection="column">
-                <Text wrap="wrap" bold>{planNow.goal || '—'}</Text>
-                {(planNow.approach ?? '') !== '' && (
-                  <Text wrap="wrap">
-                    <Text color={C.info}>→ </Text>
-                    {planNow.approach}
-                  </Text>
-                )}
-                {planNow.assumptions.map((a, i) => (
-                  <Text key={`as-${i}`} wrap="wrap" dimColor>
-                    <Text color={C.run}>~ </Text>
-                    {a}
-                  </Text>
-                ))}
-              </Box>
-            ),
-            <Text>
-              <Text color={clarityColor(planNow.clarity)}>clarity {planNow.clarity}/10</Text>
-              {planNow.revision > 0 && <Text dimColor> · rev {planNow.revision}</Text>}
-            </Text>,
-          )}
-        {planNow &&
-          section(
-            'plan',
-            'Plan',
-            true,
-            () => (
-              <Box flexDirection="column">
-                {planLevels.map((level, li) => level.map((s, si) => planStep(s, level, li, si)))}
-                <Text dimColor wrap="truncate-end">
-                  press a step for details{planLevels.some(l => l.length > 1) ? ' · 1a, 1b run in parallel' : ''}{otherTiers ? ' · ⤷ a subagent could take it' : ''}
-                </Text>
-              </Box>
-            ),
-            <Text color={doneN === planNow.steps.length ? C.ok : undefined} dimColor={doneN < planNow.steps.length}>{doneN}/{planNow.steps.length} done</Text>,
-          )}
-        {section(
-          'exec',
-          'Execution',
-          true,
-          () => (
-            <Box flexDirection="column">
-              {turnSteps.length === 0 && <Text dimColor>No steps yet.</Text>}
-              {(skillList.length > 0 || (graphReady && graphN + classicN > 0)) && (
-                <Text wrap="truncate-end">
-                  {graphReady && graphN + classicN > 0 && <Text color={C.graph}>◈ graph {graphN} </Text>}
-                  {graphReady && graphN + classicN > 0 && <Text dimColor>⌕ search {classicN} </Text>}
-                  {skillList.length > 0 && <Text color={C.info}>✦ {skillList.map(([n, c]) => (c > 1 ? `${n}×${c}` : n)).join(' · ')}</Text>}
-                </Text>
-              )}
-              {turnSteps.length > room && <Text dimColor>… {turnSteps.length - room} earlier steps</Text>}
-              {turnSteps.slice(-room).map(execStep)}
+      </Box>
+    )
+
+    const finished = checkNow?.better || planNow?.betterPrompt || ''
+    const isFinishing = Boolean(heldNow && (!checkNow || checkNow.running))
+    const sendRow = heldNow ? (
+      <Box gap={1}>
+        {finished !== '' && <Button key="send-finished" label="send the finished prompt" variant="primary" onPress={() => void sendHeld($, finished, true)} />}
+        <Button key="send-mine" label="send mine" variant={finished ? 'secondary' : 'primary'} onPress={() => void sendHeld($, heldNow.text, false)} />
+      </Box>
+    ) : (
+      finished !== '' && (
+        <Box gap={1}>
+          <Button key="fill-finished" plain label="[put in the prompt box]" onPress={() => void fillPrompt($, finished, 'The finished prompt is in the box.')} />
+          {copyButton('fin', finished)}
+        </Box>
+      )
+    )
+    const reads = planNow?.clarity ?? (checkNow && !checkNow.running && !checkNow.note ? checkNow.clarity : undefined)
+
+    const beforeView = (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column">
+          {label('YOU WROTE')}
+          {lastPrompt !== '' ? <Text wrap="wrap" italic>„{clip(lastPrompt.replace(/\s+/g, ' '), 400)}”</Text> : <Text dimColor>Send a prompt: Agent Lens reads it here first.</Text>}
+        </Box>
+        {lastPrompt !== '' && (
+          <Box flexDirection="column">
+            <Box justifyContent="space-between">
+              {label('CLAUDE READS IT AS')}
+              {reads !== undefined && <Text color={clarityColor(reads)}>clarity {reads}/10</Text>}
             </Box>
-          ),
-          <Text dimColor>
-            {turnSteps.length} steps · {k(tokensIn)}↑ {k(tokensOut)}↓ · cache {tokensIn ? Math.round((cacheRead / tokensIn) * 100) : 0}%
-          </Text>,
+            {planNow ? (
+              <Text wrap="wrap" bold>{planNow.goal || '—'}</Text>
+            ) : checkNow?.running ? (
+              <Text color={C.run}>● haiku is reading your prompt…</Text>
+            ) : isBusy ? (
+              <Text color={C.run}>● Claude is reading the request…</Text>
+            ) : null}
+            {(planNow?.assumptions ?? []).map((a, i) => (
+              <Text key={`as-${i}`} wrap="wrap" dimColor>
+                <Text color={C.run}>~ </Text>
+                {a}
+              </Text>
+            ))}
+            {!planNow &&
+              (checkNow?.missing ?? []).map((m, i) => (
+                <Text key={`cm-${i}`} wrap="wrap">
+                  <Text color={C.run}>– </Text>
+                  {m}
+                </Text>
+              ))}
+            {checkNow?.note && <Text dimColor wrap="wrap">{checkNow.note}</Text>}
+          </Box>
         )}
+        {needsYou(false)}
+        {(finished !== '' || heldNow) && (
+          <Box flexDirection="column">
+            {label('FINISHED PROMPT')}
+            {finished !== '' ? (
+              <Text wrap="wrap" italic>„{finished}”</Text>
+            ) : isFinishing ? (
+              <Text color={C.run}>● haiku is finishing it…</Text>
+            ) : (
+              <Text color={C.ok}>✓ nothing to add: it can go as it is</Text>
+            )}
+            {sendRow}
+          </Box>
+        )}
+        {lastPrompt !== '' && (
+          <Box flexDirection="column">
+            {label('RUN IT WITH')}
+            {modelRow}
+            {effortRow}
+          </Box>
+        )}
+      </Box>
+    )
+
+    const DID_TONE = { ok: C.ok, run: C.run, info: C.info, bad: C.bad } as const
+    const didList = (
+      <Box flexDirection="column">
+        {didNow.length === 0 && <Text dimColor>Nothing yet: what it does on its own shows up here.</Text>}
+        {didNow.map((d, i) => (
+          <Text key={`did-${i}`} wrap="wrap">
+            <Text color={d.tone ? DID_TONE[d.tone] : undefined}>{d.mark} </Text>
+            {d.text}
+          </Text>
+        ))}
+      </Box>
+    )
+
+    const planSection = () =>
+      planNow &&
+      section(
+        'plan',
+        'Plan',
+        false,
+        () => (
+          <Box flexDirection="column">
+            {planLevels.map((level, li) => level.map((s, si) => planStep(s, level, li, si)))}
+            <Text dimColor wrap="truncate-end">
+              press a step for details{planLevels.some(l => l.length > 1) ? ' · 1a, 1b run in parallel' : ''}{otherTiers ? ' · ⤷ a subagent could take it' : ''}
+            </Text>
+          </Box>
+        ),
+        <Text color={doneN === planNow.steps.length ? C.ok : undefined} dimColor={doneN < planNow.steps.length}>{doneN}/{planNow.steps.length} done</Text>,
+      )
+    const execSection = () =>
+      section(
+        'exec',
+        'Execution',
+        false,
+        () => (
+          <Box flexDirection="column">
+            {turnSteps.length === 0 && <Text dimColor>No steps yet.</Text>}
+            {(skillList.length > 0 || (graphReady && graphN + classicN > 0)) && (
+              <Text wrap="truncate-end">
+                {graphReady && graphN + classicN > 0 && <Text color={C.graph}>◈ graph {graphN} </Text>}
+                {graphReady && graphN + classicN > 0 && <Text dimColor>⌕ search {classicN} </Text>}
+                {skillList.length > 0 && <Text color={C.info}>✦ {skillList.map(([n, c]) => (c > 1 ? `${n}×${c}` : n)).join(' · ')}</Text>}
+              </Text>
+            )}
+            {turnSteps.length > room && <Text dimColor>… {turnSteps.length - room} earlier steps</Text>}
+            {turnSteps.slice(-room).map(execStep)}
+          </Box>
+        ),
+        <Text dimColor>
+          {turnSteps.length} steps · {k(tokensIn)}↑ {k(tokensOut)}↓ · cache {tokensIn ? Math.round((cacheRead / tokensIn) * 100) : 0}%
+        </Text>,
+      )
+
+    const duringView = (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column" borderStyle="round" borderColor={isBusy ? C.run : C.ok} paddingX={1}>
+          {progress || <Text dimColor>{planNow ? 'No steps in the plan.' : '● Claude is reading the request; its plan lands here.'}</Text>}
+          {effortNow?.isApplied && effortRow}
+        </Box>
+        {needsYou(true)}
+        <Box flexDirection="column">
+          {label('WHAT AGENT LENS DID')}
+          {didList}
+        </Box>
+        {planSection()}
+        {execSection()}
+      </Box>
+    )
+
+    const afterView = (
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column" borderStyle="round" borderColor={C.ok} paddingX={1}>
+          <Text bold color={C.ok}>✓ done</Text>
+          {planNow?.goal && <Text wrap="wrap">{planNow.goal}</Text>}
+          <Text wrap="truncate-end" dimColor>
+            {turnSteps.length} steps · {usd(turnCost)} · {k(tokensIn)}↑ {k(tokensOut)}↓ · {list.length} file{list.length === 1 ? '' : 's'} changed
+          </Text>
+          {progress}
+        </Box>
+        {needsYou(true)}
+        {section('did', `What Agent Lens did · ${didNow.length}`, true, () => didList)}
+        {planNow &&
+          planNow.betterPrompt !== '' &&
+          section('better', 'Next time, write it like this', true, () => <Text wrap="wrap" italic>„{planNow.betterPrompt}”</Text>, copyButton('better', planNow.betterPrompt))}
+        {planSection()}
+        {execSection()}
         {planNow &&
           planNow.savings.length > 0 &&
           section('save', `Savings · ${planNow.savings.length}`, false, () => (
@@ -1535,9 +1798,13 @@ export const register: Register = on => {
               .join(' · ') || '—'}
           </Text>
         ))}
-        {planNow &&
-          planNow.betterPrompt !== '' &&
-          section('better', 'Next time, write it like this', true, () => <Text wrap="wrap" italic>„{planNow.betterPrompt}”</Text>, copyButton('better', planNow.betterPrompt))}
+      </Box>
+    )
+
+    const thinkView = (
+      <Box flexDirection="column" gap={1}>
+        {stageTabs}
+        {stageShown === 'before' ? beforeView : stageShown === 'during' ? duringView : afterView}
       </Box>
     )
 
