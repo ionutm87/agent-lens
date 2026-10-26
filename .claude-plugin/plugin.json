@@ -1,6 +1,6 @@
 {
   "name": "agent-lens",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Claude Code sidebar: Flow in three stages (before you send: the finished prompt, model and effort; while it works: what Agent Lens did; done), prompt check, subagent workers, git, memories, output styles and a Hooks tab for the settings hooks.",
   "types": "./types/index.d.ts",
   "author": {

@@ -6,17 +6,39 @@ import { connectorsOf } from './extras'
 // The Chat tab: what this chat used (tools, connectors, files, skills), the plan as a to-do (the same plan as
 // Flow) and the last turn's edits, replayed one by one. Drawing only.
 
-type Ui = { Box: any; Text: any; Button: any; Code: any }
+type Ui = { Box: any; Text: any; Button: any; Svg?: any }
 type Data = { counts: Record<string, number>; skills: Record<string, number>; files: FileTouch[]; edits: EditRec[]; editIdx: number; plan: Plan | null; fold: Fold }
 type Acts = { step: (by: number) => void; replay: () => void }
 
-const MARK = { todo: ['○', undefined], run: ['●', 'yellow'], done: ['✓', 'green'], skip: ['⊘', undefined] } as const
+const MARK = { todo: ['○', 'gray'], run: ['●', 'yellow'], done: ['✓', 'green'], skip: ['⊘', 'gray'] } as const
+const SHOWN_FILES = 6
 
+// A connector's badge color, by its name: hex on the desktop (a rounded square), the nearest color name on the terminal.
+const BADGE = [
+  ['#16a34a', 'green'],
+  ['#D97757', 'red'],
+  ['#0e7490', 'cyan'],
+  ['#57534e', 'gray'],
+  ['#7c3aed', 'magenta'],
+  ['#2563eb', 'blue'],
+] as const
+const badgeOf = (server: string) => BADGE[[...server].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % BADGE.length]!
+const wordsOf = (server: string) => server.split(/[-_\s]+/).filter(Boolean)
+const initials = (server: string) => wordsOf(server).slice(0, 2).map(w => w[0]!.toUpperCase()).join('')
+const nameOf = (server: string) => wordsOf(server).map(w => w[0]!.toUpperCase() + w.slice(1)).join(' ')
+const badgeSvg = (fill: string, text: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18"><rect width="18" height="18" rx="5" fill="${fill}"/><text x="9" y="12.5" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="${text.length > 1 ? 8.5 : 10}" font-weight="700" fill="#fff">${text}</text></svg>`
+
+// "/home/me/.claude/mods/agent-lens/hooks/kit.tsx" → ["…/agent-lens/hooks", "kit.tsx"]: the folder kept short.
 const where = (path: string) => {
   const i = path.lastIndexOf('/')
+  if (i < 0) return ['', path]
+  const parts = path.slice(0, i).replace(/^\/home\/[^/]+/, '~').split('/')
 
-  return i < 0 ? ['', path] : [path.slice(0, i).replace(/^\/home\/[^/]+/, '~'), path.slice(i + 1)]
+  return [parts.length > 3 ? `…/${parts.slice(-2).join('/')}` : parts.join('/'), path.slice(i + 1)]
 }
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 // One edit as a diff: its old lines out, its new lines in (a Write: only in).
 export const editDiff = (e: EditRec, max = 8) => {
@@ -26,7 +48,12 @@ export const editDiff = (e: EditRec, max = 8) => {
 }
 
 export const chatView = (ui: Ui, d: Data, act: Acts) => {
-  const { Box, Text, Button, Code } = ui
+  const { Box, Text, Button, Svg } = ui
+  // Every surface's table carries every element name (a missing one draws an empty Box), so `Svg` is always
+  // there: only the desktop's builds a real one.
+  const isDesk = Svg?.({ source: '<svg xmlns="http://www.w3.org/2000/svg"/>', alt: '' })?.type === 'Svg'
+  // One color on both surfaces: the mockup's hex on the desktop, the nearest name on the terminal.
+  const tint = (hex: string, name: string) => (isDesk ? hex : name)
   const connectors = connectorsOf(d.counts)
   const calls = Object.values(d.counts).reduce((n, v) => n + v, 0)
   const skills = Object.entries(d.skills).sort((a, b) => b[1] - a[1])
@@ -39,6 +66,7 @@ export const chatView = (ui: Ui, d: Data, act: Acts) => {
   const steps = d.plan?.steps ?? []
   const done = steps.filter(s => s.status === 'done' || s.status === 'skip').length
   const byCount = Object.entries(d.counts).sort((a, b) => b[1] - a[1])
+  const aside = (text: string) => <Text dimColor size="caption" wrap="truncate-end">{text}</Text>
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -46,7 +74,7 @@ export const chatView = (ui: Ui, d: Data, act: Acts) => {
         ui,
         'green',
         <>
-          <Text bold color="green">In this chat</Text>
+          <Text weight="semibold" color={tint('#15803d', 'green')}>In this chat</Text>
           {tiles(ui, 'chat-tiles', [
             { label: 'tools', value: String(calls) },
             { label: 'connectors', value: String(connectors.length) },
@@ -59,75 +87,100 @@ export const chatView = (ui: Ui, d: Data, act: Acts) => {
         section(ui, d.fold, 'chat-todo', 'To-do', true, () => (
           <Box flexDirection="column">
             {steps.map(s => (
-              <Text key={`td-${s.id}`} wrap="truncate-end">
-                <Text color={MARK[s.status][1]} bold={s.status === 'run'}>{MARK[s.status][0]} </Text>
-                <Text dimColor={s.status === 'done' || s.status === 'skip'} bold={s.status === 'run'}>{s.title}</Text>
+              <Text key={`td-${s.id}`} mono size="footnote" wrap="truncate-end">
+                <Text color={MARK[s.status][1]} weight={s.status === 'run' ? 'bold' : undefined}>{MARK[s.status][0]} </Text>
+                <Text dimColor={s.status === 'done' || s.status === 'skip'} weight={s.status === 'run' ? 'bold' : undefined}>{s.title}</Text>
               </Text>
             ))}
           </Box>
-        ), <Text dimColor>{done}/{steps.length} · same plan as Flow</Text>)}
+        ), aside(`${done}/${steps.length} · same plan as Flow`))}
       {connectors.length > 0 &&
         section(ui, d.fold, 'chat-conn', 'Connectors', true, () => (
-          <Box flexDirection="column">
-            {connectors.map(c => (
-              <Box key={`cn-${c.server}`} justifyContent="space-between">
-                <Text bold>{c.server}</Text>
-                <Text dimColor wrap="truncate-end">
-                  {Object.entries(c.tools).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(' · ')}
-                </Text>
-              </Box>
-            ))}
+          <Box flexDirection="column" gap={isDesk ? 'xs' : 0}>
+            {connectors.map(c => {
+              const [hex, name] = badgeOf(c.server)
+              const mark = initials(c.server)
+              const tools = Object.entries(c.tools).sort((a, b) => b[1] - a[1]).slice(0, 2)
+
+              return (
+                <Box key={`cn-${c.server}`} gap={1} alignItems="center">
+                  {isDesk ? <Svg source={badgeSvg(hex, mark)} alt={mark} width={18} height={18} /> : <Text bold color={name}>{mark.padEnd(2)}</Text>}
+                  <Box flexGrow={1}>
+                    <Text mono size="footnote" wrap="truncate-end">{nameOf(c.server)}</Text>
+                  </Box>
+                  <Text mono size="footnote" dimColor wrap="truncate-end">{tools.map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(' · ')}</Text>
+                </Box>
+              )
+            })}
           </Box>
-        ), <Text dimColor>{connectors.length} · {connectors.reduce((n, c) => n + c.calls, 0)} calls</Text>)}
+        ), aside(`${connectors.length} · ${connectors.reduce((n, c) => n + c.calls, 0)} calls`))}
       {d.files.length > 0 &&
         section(ui, d.fold, 'chat-files', 'Files', true, () => (
           <Box flexDirection="column">
-            {d.files.slice(-8).reverse().map(f => {
+            {d.files.slice(-SHOWN_FILES).reverse().map(f => {
               const [dir, name] = where(f.path)
 
               return (
-                <Text key={`fl-${f.path}`} wrap="truncate-end">
-                  <Text color={f.wrote ? 'yellow' : 'green'}>{(f.wrote ? 'wrote' : 'read').padEnd(6)}</Text>
+                <Text key={`fl-${f.path}`} mono size="footnote" wrap="truncate-end">
+                  <Text color={f.wrote ? tint('#c2410c', 'yellow') : tint('#15803d', 'green')}>{(f.wrote ? 'wrote' : 'read').padEnd(7)}</Text>
                   {name} <Text dimColor>{dir}</Text>
                 </Text>
               )
             })}
-            {d.files.length > 8 && <Text dimColor>… {d.files.length - 8} more</Text>}
+            {d.files.length > SHOWN_FILES && <Text mono size="footnote" dimColor>… {d.files.length - SHOWN_FILES} more</Text>}
           </Box>
-        ), <Text dimColor>{read} read · {wrote} written</Text>)}
+        ), aside(`${read} read · ${wrote} written`))}
       {shown &&
         card(
           ui,
           'gray',
-          <>
+          <Box flexDirection="column" gap={isDesk ? 'xs' : 0}>
             <Box justifyContent="space-between">
-              <Text bold>Last turn's edits</Text>
-              <Text dimColor>
-                {turnEdits.length} edit{turnEdits.length === 1 ? '' : 's'} · {new Set(turnEdits.map(e => e.path)).size} files
-              </Text>
+              <Text weight="semibold">Last turn's edits</Text>
+              {aside(`${plural(turnEdits.length, 'edit')} · ${plural(new Set(turnEdits.map(e => e.path)).size, 'file')}`)}
             </Box>
-            <Box gap={1}>
-              <Button key="replay" label="▶ replay" onPress={act.replay} />
-              <Button key="edit-prev" plain label="◀" onPress={() => act.step(-1)} />
-              <Text dimColor>{idx + 1}/{turnEdits.length}</Text>
-              <Button key="edit-next" plain label="▶" onPress={() => act.step(1)} />
-              <Text wrap="truncate-start">{where(shown.path)[1]}</Text>
+            <Box gap={1} alignItems="center">
+              <Button key="replay" variant="primary" label="▶ replay" onPress={act.replay} />
+              <Button key="edit-prev" plain dimColor label="◀" onPress={() => act.step(-1)} />
+              <Text dimColor tabular>{idx + 1}/{turnEdits.length}</Text>
+              <Button key="edit-next" plain dimColor label="▶" onPress={() => act.step(1)} />
+              <Box flexGrow={1}>
+                <Text mono size="footnote" wrap="truncate-start">{where(shown.path)[1]}</Text>
+              </Box>
             </Box>
-            <Code source={editDiff(shown)} format="diff" wrap="truncate-end" />
-          </>,
+            <Box flexDirection="column">
+              {editDiff(shown).split('\n').map((line, i) => {
+                const isOut = line.startsWith('-')
+
+                return (
+                  <Box key={`df-${i}`} backgroundColor={isDesk ? (isOut ? '#fef2f2' : '#f0fdf4') : undefined} paddingX={isDesk ? 1 : 0}>
+                    <Text mono size="footnote" color={isOut ? tint('#991b1b', 'red') : tint('#166534', 'green')} wrap="truncate-end">{line}</Text>
+                  </Box>
+                )
+              })}
+            </Box>
+          </Box>,
         )}
       {skills.length > 0 &&
         section(ui, d.fold, 'chat-skills', 'Skills', true, () => (
           <Box flexDirection="column">
             {skills.map(([n, c]) => (
-              <Text key={`sk-${n}`}>
-                <Text color="blue">✦ </Text>
+              <Text key={`sk-${n}`} mono size="footnote">
+                <Text color={tint('#1d4ed8', 'blue')}>✦ </Text>
                 {n} <Text dimColor>×{c}</Text>
               </Text>
             ))}
           </Box>
-        ), <Text dimColor>{skills.length}</Text>)}
-      {section(ui, d.fold, 'chat-tools', 'Tools by count', false, () => <Text wrap="wrap">{byCount.slice(0, 16).map(([n, c]) => `${n} ${c}`).join(' · ') || '—'}</Text>, <Text dimColor wrap="truncate-end">{byCount.slice(0, 3).map(([n, c]) => `${n} ${c}`).join(' · ')}</Text>)}
+        ), aside(String(skills.length)))}
+      {section(
+        ui,
+        d.fold,
+        'chat-tools',
+        'Tools by count',
+        false,
+        () => <Text mono size="footnote" wrap="wrap">{byCount.slice(0, 16).map(([n, c]) => `${n} ${c}`).join(' · ') || '—'}</Text>,
+        aside(`${byCount.slice(0, 3).map(([n, c]) => `${n} ${c}`).join(' · ')}${byCount.length > 3 ? ' …' : ''}`),
+      )}
     </Box>
   )
 }

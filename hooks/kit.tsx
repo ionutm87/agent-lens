@@ -15,8 +15,8 @@ export const tiles = ({ Box, Text }: Ui, key: string, items: { label: string; va
   <Box key={key} gap={1}>
     {items.map(t => (
       <Box key={`${key}-${t.label}`} flexDirection="column" flexGrow={1} borderStyle="round" borderColor="gray" paddingX={1}>
-        <Text dimColor wrap="truncate-end">{t.label}</Text>
-        <Text bold color={t.color} wrap="truncate-end">{t.value}</Text>
+        <Text dimColor size="caption" wrap="truncate-end">{t.label}</Text>
+        <Text weight="bold" tabular color={t.color} wrap="truncate-end">{t.value}</Text>
       </Box>
     ))}
   </Box>
@@ -60,7 +60,11 @@ export const section = ({ Box, Button }: Ui, fold: Fold, key: string, title: str
         <Button key={`fold-${key}`} plain label={`${open ? '▾' : '▸'} ${title}`} onPress={() => fold.toggle(key, !open)} />
         {aside}
       </Box>
-      {open && body()}
+      {open && (
+        <Box flexDirection="column" paddingLeft={2}>
+          {body()}
+        </Box>
+      )}
     </Box>
   )
 }

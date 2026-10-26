@@ -5,18 +5,40 @@ import type { Fold } from './kit'
 // The Setup tab: Agent Lens's own switches (what used to be separate mods), the thresholds, the other plugins
 // from settings.json, and the way into Hooks and Output styles. Drawing only.
 
-type Ui = { Box: any; Text: any; Button: any }
+type Ui = { Box: any; Text: any; Button: any; Svg?: any }
+// `hotkey` may come from register.tsx; rows inside a tab draw none.
 export type Switch = { key: string; label: string; on: boolean; from: string; hotkey?: string; value?: string }
 type Data = { switches: Switch[]; setup: Setup; plugins: PluginRow[]; hooks: string; style: string; fold: Fold }
 type Acts = { flip: (key: string) => void; next: (key: keyof Setup) => void; plugin: (id: string) => void; hooks: () => void; styles: () => void }
 
+// The desktop's switch: a 26×14 pill, green with the knob right when on, gray with the knob left when off.
+const pill = (on: boolean) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="26" height="14" viewBox="0 0 26 14"><rect width="26" height="14" rx="7" fill="${on ? '#16a34a' : '#d6d3d1'}"/><circle cx="${on ? 19 : 7}" cy="7" r="5" fill="#fff"/></svg>`
+
 export const setupView = (ui: Ui, d: Data, act: Acts) => {
-  const { Box, Text, Button } = ui
+  const { Box, Text, Button, Svg } = ui
   const onN = d.switches.filter(s => s.on).length
-  const row = (s: Switch) => (
-    <Box key={`sw-${s.key}`} justifyContent="space-between">
-      <Button key={`sw-${s.key}`} plain dimColor={!s.on} hotkey={s.hotkey} label={`${s.on ? '✓' : '○'} ${s.label}${s.value ? ` ${s.value}` : ''}`} onPress={() => act.flip(s.key)} />
-      <Text dimColor>{s.from}</Text>
+
+  // One switch row: the switch (pill on desktop, ✓/○ on the terminal) and its label, pressed as one; the source dim on the right.
+  const switchRow = (key: string, on: boolean, label: string, aside: string, press: () => void) => (
+    <Box key={`row-${key}`} justifyContent="space-between" alignItems="center" gap={1}>
+      <Box alignItems="center" gap={1}>
+        {Svg && <Svg source={pill(on)} alt={on ? 'on' : 'off'} width={26} height={14} />}
+        {Svg ? (
+          <Button key={key} plain dimColor={!on} label={label} onPress={press} />
+        ) : (
+          <Button key={key} plain dimColor={!on} label={label} onPress={press}>
+            <Text color={on ? 'green' : 'gray'}>{on ? '✓' : '○'}</Text> {label}
+          </Button>
+        )}
+      </Box>
+      <Text dimColor size="footnote" wrap="truncate-end">{aside}</Text>
+    </Box>
+  )
+  const goRow = (key: string, label: string, summary: string, press: () => void) => (
+    <Box key={`row-${key}`} justifyContent="space-between" gap={1}>
+      <Button key={key} plain label={label} onPress={press} />
+      <Text dimColor size="footnote" wrap="truncate-end">{summary}</Text>
     </Box>
   )
   const THRESHOLDS: [keyof Setup, string, string][] = [
@@ -33,51 +55,43 @@ export const setupView = (ui: Ui, d: Data, act: Acts) => {
         'green',
         <>
           <Box justifyContent="space-between">
-            <Text bold color="green">Setup</Text>
-            <Text dimColor>applies at once</Text>
+            <Text weight="semibold" color="green">Setup</Text>
+            <Text dimColor size="caption">applies in every chat</Text>
           </Box>
-          <Text>
+          <Text size="footnote">
             <Text color="green">{onN} on</Text>
             <Text dimColor> · {d.switches.length - onN} off · {d.plugins.length} plugins</Text>
           </Text>
         </>,
       )}
-      {section(ui, d.fold, 'set-built', 'Built in', true, () => <Box flexDirection="column">{d.switches.map(row)}</Box>, <Text dimColor>was a separate mod</Text>)}
+      {section(ui, d.fold, 'set-built', 'Built in', true, () => (
+        <Box flexDirection="column">
+          {d.switches.map(s => switchRow(`sw-${s.key}`, s.on, s.value ? `${s.label} · ${s.value}` : s.label, s.from, () => act.flip(s.key)))}
+        </Box>
+      ), <Text dimColor size="caption">was a separate mod</Text>)}
       {section(ui, d.fold, 'set-limits', 'Thresholds', true, () => (
         <Box flexDirection="column">
           {THRESHOLDS.map(([key, label, value]) => (
-            <Box key={`th-${key}`} justifyContent="space-between">
-              <Text>{label}</Text>
-              <Button key={`th-${key}`} plain label={`[${value}]`} onPress={() => act.next(key)} />
+            <Box key={`row-th-${key}`} justifyContent="space-between" gap={1}>
+              <Button key={`th-${key}`} plain label={label} onPress={() => act.next(key)} />
+              <Text weight="bold" tabular>{value}</Text>
             </Box>
           ))}
-          <Text dimColor>press a value for the next one</Text>
         </Box>
-      ))}
+      ), <Text dimColor size="caption">press a row for the next value</Text>)}
       {d.plugins.length > 0 &&
         section(ui, d.fold, 'set-plugins', 'Other plugins', false, () => (
           <Box flexDirection="column">
             {d.plugins.map(p => {
-              const [name, market] = p.id.split('@')
+              const [name = p.id, market = ''] = p.id.split('@')
 
-              return (
-                <Box key={`pl-${p.id}`} justifyContent="space-between">
-                  <Button key={`pl-${p.id}`} plain dimColor={!p.on} label={`${p.on ? '✓' : '○'} ${name}`} onPress={() => act.plugin(p.id)} />
-                  <Text dimColor wrap="truncate-end">{market ?? ''}</Text>
-                </Box>
-              )
+              return switchRow(`pl-${p.id}`, p.on, name, market, () => act.plugin(p.id))
             })}
-            <Text dimColor wrap="wrap">settings.json enabledPlugins · a change counts after /reload-plugins</Text>
+            <Text dimColor size="caption" wrap="wrap">settings.json enabledPlugins · counts after /reload-plugins</Text>
           </Box>
-        ), <Text dimColor>{d.plugins.filter(p => p.on).length} on</Text>)}
-      <Box justifyContent="space-between">
-        <Button key="setup-hooks" plain label="▸ Hooks" hotkey="h" onPress={act.hooks} />
-        <Text dimColor>{d.hooks}</Text>
-      </Box>
-      <Box justifyContent="space-between">
-        <Button key="setup-styles" plain label="▸ Output styles" onPress={act.styles} />
-        <Text dimColor>{d.style}</Text>
-      </Box>
+        ), <Text dimColor size="caption">{d.plugins.filter(p => p.on).length} on</Text>)}
+      {goRow('setup-hooks', '▸ Hooks', d.hooks, act.hooks)}
+      {goRow('setup-styles', '▸ Output styles', d.style, act.styles)}
     </Box>
   )
 }

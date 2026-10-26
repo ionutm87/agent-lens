@@ -1020,6 +1020,8 @@ export const register: Register = on => {
   // A prompt sent by a human counts as "requested": the panel settles at any width,
   // and if it was closed by hand, it comes back. On an already open id it's a no-op.
   on('prompt.submit', async ($, e, next) => {
+    // A `!` shell command or a local command's echo is not a request: it leaves the turn's state alone.
+    if (/^\s*<(bash-|local-command|command-)/.test(e.text)) return next(e)
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
     const now = await $.clock.now()
     // A held prompt sent from Flow comes back through $.prompt.submit: it is still the person's own.
@@ -1228,7 +1230,12 @@ export const register: Register = on => {
       startedAt: await $.clock.now(),
       tools: 0,
       prompt: clip(e.prompt, 1500),
-      planStep: (await read($, plan))?.steps.find(s => s.status === 'run')?.title,
+      planStep: await (async () => {
+        const steps = (await read($, plan))?.steps ?? []
+        const i = steps.findIndex(s => s.status === 'run')
+
+        return i < 0 ? undefined : `${i + 1} · ${steps[i]?.title}`
+      })(),
     }
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
     await update($, workers, list => [...list, worker].slice(-30))
@@ -1324,7 +1331,9 @@ export const register: Register = on => {
     const stageNow = await read($, stageView)
     const setupNow = await read($, setup)
     const reflectNow = await read($, reflect)
-    const ui = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Svg?: any }
+    // The terminal's table answers every name (a missing element builds an empty Box): Svg only off the terminal.
+    const resolved = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Svg?: any }
+    const ui = { ...resolved, Svg: e.surface === 'terminal' ? undefined : resolved.Svg }
     const { context, rateLimits } = await $.session.usage()
     const now = await $.clock.now()
     const room = Math.max(6, (e.viewport?.rows ?? 30) - 12)
@@ -1345,9 +1354,9 @@ export const register: Register = on => {
       <Box flexDirection="column" borderStyle="round" borderColor={C.accent} paddingX={1}>
         <Box justifyContent="space-between">
           <Text wrap="truncate-end">
-            <Text bold color={C.accent}>◆ AGENT LENS </Text>
-            <Text bold color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
-            {last?.effort && <Text color={C.info}> {last.effort}</Text>}
+            <Text weight="bold" color={C.accent}>◆ AGENT LENS </Text>
+            <Text size="footnote" color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
+            {last?.effort && <Text size="footnote" color={C.info}> {last.effort}</Text>}
           </Text>
           <Box gap={1}>
             <Text color={running ? C.run : C.ok}>{running ? `● ${running} worker${running > 1 ? 's' : ''}` : '○ idle'}</Text>
@@ -1356,7 +1365,6 @@ export const register: Register = on => {
               key="tab-styles"
               plain
               label={current === 'styles' ? '[Aa]' : 'Aa'}
-              hotkey="y"
               onPress={() => {
                 void update($, tab, () => (current === 'styles' ? 'think' : 'styles'))
                 if (current !== 'styles') void loadStyles($)
@@ -1373,9 +1381,9 @@ export const register: Register = on => {
           { label: five?.resetsAt ? `5h · ${until(Date.parse(five.resetsAt) - now)}` : '5h', value: five ? `${five.percentUsed}%` : '—', color: five ? pctColor(five.percentUsed, 90) : undefined },
         ])}
         <Box gap={1}>
-          <Button key="planfirst" plain dimColor={!isPlanFirst} label={`${isPlanFirst ? '✓' : '○'} miniplan`} hotkey="n" onPress={() => update($, planFirst, v => !v)} />
-          <Button key="check" plain dimColor={!isChecking} label={`${isChecking ? '✓' : '○'} prompt check`} hotkey="k" onPress={() => void flipCheck($)} />
-          {graphReady && <Button key="graph" plain dimColor={!isGraphFirst} label={`${isGraphFirst ? '✓' : '○'} graph first`} hotkey="g" onPress={() => update($, graphFirst, v => !v)} />}
+          <Button key="planfirst" plain dimColor={!isPlanFirst} label={`${isPlanFirst ? '✓' : '○'} miniplan`} onPress={() => update($, planFirst, v => !v)} />
+          <Button key="check" plain dimColor={!isChecking} label={`${isChecking ? '✓' : '○'} prompt check`} onPress={() => void flipCheck($)} />
+          {graphReady && <Button key="graph" plain dimColor={!isGraphFirst} label={`${isGraphFirst ? '✓' : '○'} graph first`} onPress={() => update($, graphFirst, v => !v)} />}
         </Box>
       </Box>
     )
@@ -1617,18 +1625,14 @@ export const register: Register = on => {
           </Text>
           {q.why !== '' && <Text wrap="wrap" dimColor>{'  '}{q.why}</Text>}
           {isAsking ? (
-            <Box flexDirection="column">
-              {q.options.map((o, oi) => (
-                <Box key={`${prefix}-${i}-r-${oi}`}>
-                  <Text>{'  '}</Text>
-                  <Button key={`${prefix}-${i}-o-${oi}`} plain hotkey={isHot ? String(oi + 1) : undefined} label={oi === 0 ? `${o} ★` : o} onPress={() => void answer($, q.ask, o)} />
-                </Box>
-              ))}
+            <Box flexDirection="column" gap={1}>
+              <Box gap={1} flexWrap="wrap">
+                {q.options.map((o, oi) => (
+                  <Button key={`${prefix}-${i}-o-${oi}`} variant={oi === 0 ? 'primary' : 'secondary'} hotkey={isHot ? String(oi + 1) : undefined} label={oi === 0 ? `${o} ★` : o} onPress={() => void answer($, q.ask, o)} />
+                ))}
+              </Box>
               {q.fallback !== '' && (
-                <Box>
-                  <Text>{'  '}</Text>
-                  <Button key={`${prefix}-${i}-d`} plain dimColor hotkey={isHot ? '0' : undefined} label={`keep the default: ${q.fallback}`} onPress={() => void answer($, q.ask, q.fallback)} />
-                </Box>
+                <Button key={`${prefix}-${i}-d`} plain dimColor hotkey={isHot ? '0' : undefined} label={`keep the default: ${q.fallback}`} onPress={() => void answer($, q.ask, q.fallback)} />
               )}
               <Input
                 key={`${prefix}-${i}-in`}
@@ -1676,19 +1680,33 @@ export const register: Register = on => {
     const autoStage: Stage = heldNow || phase === 'idle' || phase === 'understand' ? 'before' : phase === 'done' ? 'after' : 'during'
     const stageShown = stageNow ?? autoStage
     const STAGES = [
-      ['before', '1 before'],
-      ['during', '2 working'],
-      ['after', '3 done'],
+      ['before', ui.Svg ? '1 Before you send' : '1 before'],
+      ['during', ui.Svg ? '2 While it works' : '2 working'],
+      ['after', ui.Svg ? '3 When it is done' : '3 done'],
     ] as const
+    // Three columns, a thin bar over each (dark = the stage shown, green = passed), the name under it.
+    const stageOrder = STAGES.findIndex(([id]) => id === autoStage)
     const stageTabs = (
-      <Box gap={2}>
-        {STAGES.map(([id, name]) => (
-          <Button key={`stage-${id}`} plain dimColor={stageShown !== id} label={stageShown === id ? `[${name}]` : name} onPress={() => void update($, stageView, () => (id === autoStage ? null : id))} />
-        ))}
+      <Box gap={1}>
+        {STAGES.map(([id, name], i) => {
+          const isShown = stageShown === id
+          const color = isShown ? 'white' : i < stageOrder ? 'green' : 'gray'
+
+          return (
+            <Box key={`stage-col-${id}`} flexDirection="column" flexGrow={1}>
+              {ui.Svg ? (
+                <ui.Svg key={`stage-bar-${id}`} source={`<svg xmlns="http://www.w3.org/2000/svg" width="140" height="4" viewBox="0 0 140 4" preserveAspectRatio="none"><rect width="140" height="4" rx="2" fill="${isShown ? '#e7e5e4' : i < stageOrder ? '#22c55e' : '#57534e'}"/></svg>`} alt="" width={140} height={4} />
+              ) : (
+                <Text color={color}>{'━'.repeat(14)}</Text>
+              )}
+              <Button key={`stage-${id}`} plain dimColor={!isShown} label={name} onPress={() => void update($, stageView, () => (id === autoStage ? null : id))} />
+            </Box>
+          )
+        })}
       </Box>
     )
     const label = (text: string) => (
-      <Text dimColor bold>
+      <Text dimColor size="caption" weight="semibold">
         {text}
       </Text>
     )
@@ -1764,30 +1782,12 @@ export const register: Register = on => {
       </Box>
     )
     const tip = shown?.tip
-    const modelRow = (
-      <Box flexDirection="column">
-        <Text wrap="truncate-end">
-          <Text dimColor>model  </Text>
-          <Text bold color={C.model}>{short(last?.model ?? String(sessionModel ?? '—'))}</Text>
-          {!tip && <Text color={C.ok}> ✓ fits</Text>}
-        </Text>
-        {tip && (
-          <Box>
-            <Text color={C.info} wrap="truncate-end">
-              {'       '}⤷ {tip.note}{' '}
-            </Text>
-            <Button key="model-tip" plain label={`[${tip.command}]`} onPress={() => void fillPrompt($, tip.command, 'Press Enter to switch: it counts from your next message.')} />
-          </Box>
-        )}
-      </Box>
-    )
-
     const finished = checkNow?.better || planNow?.betterPrompt || ''
     const isFinishing = Boolean(heldNow && (!checkNow || checkNow.running))
     const sendRow = heldNow ? (
       <Box gap={1}>
-        {finished !== '' && <Button key="send-finished" label="send the finished prompt" variant="primary" onPress={() => void sendHeld($, finished, true)} />}
-        <Button key="send-mine" label="send mine" variant={finished ? 'secondary' : 'primary'} onPress={() => void sendHeld($, heldNow.text, false)} />
+        {finished !== '' && <Button key="send-finished" label="Send the finished prompt" variant="primary" onPress={() => void sendHeld($, finished, true)} />}
+        <Button key="send-mine" label="Send mine" variant={finished ? 'secondary' : 'primary'} onPress={() => void sendHeld($, heldNow.text, false)} />
       </Box>
     ) : (
       finished !== '' && (
@@ -1812,7 +1812,7 @@ export const register: Register = on => {
               {reads !== undefined && <Text color={clarityColor(reads)}>clarity {reads}/10</Text>}
             </Box>
             {planNow ? (
-              <Text wrap="wrap" bold>{planNow.goal || '—'}</Text>
+              <Text wrap="wrap" weight="semibold">{planNow.goal || '—'}</Text>
             ) : checkNow?.running ? (
               <Text color={C.run}>● haiku is reading your prompt…</Text>
             ) : isBusy ? (
@@ -1836,10 +1836,13 @@ export const register: Register = on => {
         )}
         {needsYou(false)}
         {(finished !== '' || heldNow) && (
-          <Box flexDirection="column">
-            {label('FINISHED PROMPT')}
+          <Box flexDirection="column" gap={1}>
+            <Box justifyContent="space-between">
+              {label('FINISHED PROMPT')}
+              {finished !== '' && !heldNow && <Button key="fin-edit" plain label="edit" onPress={() => void fillPrompt($, finished, 'The finished prompt is in the box.')} />}
+            </Box>
             {finished !== '' ? (
-              <Text wrap="wrap" italic>„{finished}”</Text>
+              card({ Box, Text, Button }, 'gray', <Text wrap="wrap" size="footnote">{finished}</Text>)
             ) : isFinishing ? (
               <Text color={C.run}>● haiku is finishing it…</Text>
             ) : (
@@ -1851,8 +1854,25 @@ export const register: Register = on => {
         {lastPrompt !== '' && (
           <Box flexDirection="column">
             {label('RUN IT WITH')}
-            {modelRow}
-            {effortRow}
+            <Box gap={2} flexWrap="wrap">
+              <Text color="magenta" size="footnote">
+                {short(last?.model ?? String(sessionModel ?? '—'))}
+                {tip ? '' : ' ✓ fits'}
+              </Text>
+              <Text color="yellow" size="footnote">
+                effort {shown ? shown.level : 'your level'}
+                {shown ? ` · ${shown.why}` : ''}
+              </Text>
+              {planNow && <Text dimColor size="footnote">~{planNow.steps.length} steps</Text>}
+            </Box>
+            {tip && (
+              <Box gap={1}>
+                <Text color={C.info} size="footnote" wrap="truncate-end">⤷ {tip.note}</Text>
+                <Button key="model-tip" plain label={tip.command} onPress={() => void fillPrompt($, tip.command, 'Press Enter to switch: it counts from your next message.')} />
+              </Box>
+            )}
+            {shown && !shown.isApplied && <Text dimColor size="footnote">{effortModeNow === 'tip' ? 'tip only' : heldNow ? 'set when sent' : ''}</Text>}
+            {effortButtons}
           </Box>
         )}
       </Box>
@@ -2093,8 +2113,8 @@ export const register: Register = on => {
       { key: 'plan', label: 'miniplan before the first tool', on: isPlanFirst, from: 'agent-lens' },
       { key: 'check', label: 'prompt check', on: isChecking, from: 'brain-dump' },
       ...(graphReady ? [{ key: 'graph', label: 'codegraph first', on: isGraphFirst, from: 'agent-lens' }] : []),
-      { key: 'hold', label: 'hold long prompts', on: isHolding, from: 'brain-dump', hotkey: 'b' },
-      { key: 'effort', label: 'effort per message', on: effortModeNow !== 'off', from: 'effort-picker', hotkey: 'v', value: effortModeNow },
+      { key: 'hold', label: 'hold long prompts', on: isHolding, from: 'brain-dump' },
+      { key: 'effort', label: 'effort per message', on: effortModeNow !== 'off', from: 'effort-picker', value: effortModeNow },
       { key: 'band', label: 'task band above the prompt', on: setupNow.band, from: 'helper-desk' },
       { key: 'cache', label: 'cache clock in the band', on: setupNow.cache, from: 'cache-clock' },
       { key: 'handoff', label: 'handoff offer', on: setupNow.handoff, from: 'handoff' },
@@ -2170,7 +2190,7 @@ export const register: Register = on => {
     if (!planNow && !heldNow && !isWorking && !idle) return next(e)
 
     const { Box, Text, Button, ...rest } = $.ui.resolve(e) as ReturnType<typeof $.ui.resolve> & { Svg?: any }
-    const Svg = rest.Svg
+    const Svg = e.surface === 'terminal' ? undefined : rest.Svg
     const now = Math.max(await read($, tick), await $.clock.now())
     const { context } = await $.session.usage()
     const ctx = context.percent ?? 0
@@ -2181,32 +2201,46 @@ export const register: Register = on => {
     const left = conf.cache && !isWorking ? cacheLeft(idle, now, conf.cacheTtlMin) : null
     const mainSteps = (await read($, steps)).filter(s => !s.agentId)
     const cached = mainSteps.at(-1)?.tokensIn ?? 0
-    const title = clip((planNow?.goal || (await read($, prompt)) || 'Agent Lens').replace(/\s+/g, ' '), 60)
-    const cols = e.props.bodyColumns
+    const said = await read($, prompt)
+    const title = clip((planNow?.goal || (said.startsWith('<') ? '' : said) || 'Agent Lens').replace(/\s+/g, ' '), 70)
+    const barW = Math.max(120, Math.min(360, Math.round(e.props.bodyColumns * 2.4)))
+    const ctxColor = ctx >= conf.handoffAt ? 'red' : ctx >= conf.handoffAt - 20 ? 'yellow' : 'green'
+    const cacheColor = left === 0 ? 'red' : left !== null && left <= conf.cacheWarnS * 1000 ? 'yellow' : 'blue'
 
+    // Each piece keeps its own line: the title gives way first, the chips never wrap.
     const taskLine = (
       <Box key="band-task" gap={1} alignItems="center">
         <Text color="magenta">●</Text>
-        <Text bold wrap="truncate-end">{title}</Text>
-        {total > 0 &&
-          (Svg ? (
-            <Svg key="band-bar" source={barSvg(doneN, total, 280, `Tasks ${doneN}/${total}`)} alt={`Tasks ${doneN} of ${total}, ${pct} percent`} width={280} height={14} />
-          ) : (
-            <Text>
-              <Text color="magenta">{'▰'.repeat(Math.round(pct / 10))}</Text>
-              <Text dimColor>{'▱'.repeat(10 - Math.round(pct / 10))} {doneN}/{total}</Text>
-            </Text>
-          ))}
-        {total > 0 && <Text dimColor>{pct}%</Text>}
+        <Box flexShrink={1}>
+          <Text weight="semibold" wrap="truncate-end">{title}</Text>
+        </Box>
+        {total > 0 && (
+          <Box flexShrink={0} gap={1} alignItems="center">
+            {Svg ? (
+              <Svg key="band-bar" source={barSvg(doneN, total, barW, `Tasks ${doneN}/${total}`)} alt={`Tasks ${doneN} of ${total}, ${pct} percent`} width={barW} height={14} />
+            ) : (
+              <Text>
+                <Text color="magenta">{'▰'.repeat(Math.round(pct / 10))}</Text>
+                <Text dimColor>{'▱'.repeat(10 - Math.round(pct / 10))} {doneN}/{total}</Text>
+              </Text>
+            )}
+            <Text dimColor tabular size="footnote">{pct}%</Text>
+          </Box>
+        )}
         <Box flexGrow={1} />
-        {conf.cache && (isWorking ? <Text color="blue">◔ cache warm</Text> : left !== null && <Text color={left === 0 ? 'red' : left <= conf.cacheWarnS * 1000 ? 'yellow' : 'blue'}>{left === 0 ? '◌ cache cold' : `◔ cache ${mmss(left)}`}</Text>)}
-        {conf.cache && !isWorking && left !== null && left > 0 && <Button key="band-warm" plain label="keep warm" onPress={() => void keepWarm($)} />}
-        <Text color={ctx >= conf.handoffAt ? 'red' : ctx >= conf.handoffAt - 20 ? 'yellow' : 'green'}>ctx {ctx}%</Text>
-        <Button key="band-hide" plain dimColor label="✕" onPress={() => void update($, bandHidden, () => true)} />
+        <Box flexShrink={0} gap={1} alignItems="center">
+          {conf.cache && isWorking && <Text color="blue" size="footnote" wrap="truncate-end">◔ cache warm</Text>}
+          {conf.cache && !isWorking && left !== null && (
+            <Text color={cacheColor} size="footnote" tabular wrap="truncate-end">{left === 0 ? '◌ cache cold' : `◔ cache ${mmss(left)}`}</Text>
+          )}
+          {conf.cache && !isWorking && left !== null && left > 0 && <Button key="band-warm" plain label="keep warm" onPress={() => void keepWarm($)} />}
+          <Text color={ctxColor} size="footnote" tabular wrap="truncate-end">ctx {ctx}%</Text>
+          <Button key="band-hide" plain dimColor label="✕" onPress={() => void update($, bandHidden, () => true)} />
+        </Box>
       </Box>
     )
 
-    // One offer, the first that applies.
+    // One offer, the first that applies, in a framed row of its color.
     const check = await read($, promptCheck)
     const answered = await read($, answers)
     const openQ = [...(check?.questions ?? []), ...(planNow?.questions ?? [])].filter((q, i, all) => all.findIndex(x => x.ask === q.ask) === i && (answered[q.ask]?.state ?? 'draft') === 'draft')
@@ -2214,77 +2248,122 @@ export const register: Register = on => {
     const finished = check?.better || planNow?.betterPrompt || ''
     const ref = await read($, reflect)
     const snooze = await read($, handoffSnooze)
-    const offer = heldNow ? (
-      <Box key="band-held" flexDirection="column">
-        <Text wrap="truncate-end">
-          <Text bold color="yellow">⏸ Long prompt held</Text>
-          <Text dimColor>{check?.running ? ' · haiku is reading it…' : check && !check.note ? ` · clarity ${check.clarity}/10${openQ.length ? ` · ${openQ.length} gap${openQ.length > 1 ? 's' : ''}` : ''}` : ''}</Text>
-        </Text>
-        {openQ.slice(0, 2).map((q, i) => (
-          <Box key={`band-q-${i}`} gap={1}>
-            <Text wrap="truncate-end">? {q.ask}</Text>
-            {q.options.slice(0, 2).map((o, oi) => (
-              <Button key={`band-q-${i}-${oi}`} plain label={`[${oi + 1} ${o}${oi === 0 ? ' ★' : ''}]`} onPress={() => void answer($, q.ask, o)} />
-            ))}
-          </Box>
-        ))}
-        <Box gap={1}>
-          {finished !== '' && <Button key="band-send-finished" label="send the finished prompt" variant="primary" onPress={() => void sendHeld($, finished, true)} />}
-          <Button key="band-send-mine" label="send as is" onPress={() => void sendHeld($, heldNow.text, false)} />
-        </Box>
-      </Box>
-    ) : firstQ && isWorking ? (
-      <Box key="band-ask" gap={1}>
-        <Text wrap="truncate-end">
-          <Text bold color="blue">? </Text>
-          {firstQ.ask}
-        </Text>
-        {firstQ.options.slice(0, 3).map((o, oi) => (
-          <Button key={`band-a-${oi}`} plain label={`[${o}${oi === 0 ? ' ★' : ''}]`} onPress={() => void answer($, firstQ.ask, o)} />
-        ))}
-      </Box>
-    ) : left !== null && left > 0 && left <= conf.cacheWarnS * 1000 ? (
-      <Box key="band-cache" gap={1}>
-        <Text bold color="yellow">◕ Cache cold in {mmss(left)}</Text>
-        <Text dimColor wrap="truncate-end">{k(cached)} tokens re-read at full price on the next prompt</Text>
-        <Box flexGrow={1} />
-        <Button key="band-warm2" label="Keep warm" onPress={() => void keepWarm($)} />
-      </Box>
-    ) : conf.handoff && !isWorking && ctx >= Math.max(conf.handoffAt, snooze + 10) ? (
-      <Box key="band-handoff" gap={1}>
-        <Text bold color="red">Context {ctx}%</Text>
-        <Text dimColor wrap="truncate-end">start fresh with a handoff prompt</Text>
-        <Box flexGrow={1} />
-        <Button key="band-handoff-go" label="Write handoff" onPress={() => void writeHandoff($)} />
-        <Button key="band-handoff-no" plain dimColor label="Not now" onPress={() => void update($, handoffSnooze, () => ctx)} />
-      </Box>
-    ) : ref?.state === 'open' && ref.rule ? (
-      <Box key="band-rule" gap={1}>
-        <Text bold color="magenta">✎ Save as a rule?</Text>
-        <Text italic wrap="truncate-end">„{ref.rule}”</Text>
-        <Box flexGrow={1} />
-        <Button key="band-rule-p" label="Project" onPress={() => void saveRule($, 'project')} />
-        <Button key="band-rule-a" label="Everywhere" onPress={() => void saveRule($, 'all')} />
-        <Button key="band-rule-x" plain dimColor label="✕" onPress={() => void update($, reflect, r => (r ? { ...r, state: 'skipped' as const } : r))} />
-      </Box>
-    ) : null
-
-    const pick = await read($, effortPick)
-    const effortLine = isWorking && pick && (pick.isApplied || pick.tip) && (
-      <Box key="band-effort" gap={1}>
-        <Text bold color="yellow">Effort {pick.level}</Text>
-        <Text dimColor wrap="truncate-end">for this message: {pick.why}</Text>
-        <Box flexGrow={1} />
-        {pick.isApplied && <Button key="band-lower" plain label="− lower" onPress={() => void moveEffort($, -1)} />}
-        {pick.isApplied && <Button key="band-higher" plain label="+ higher" onPress={() => void moveEffort($, 1)} />}
-        {pick.tip && <Button key="band-model" plain label={pick.tip.command} onPress={() => void fillPrompt($, pick.tip!.command, 'Press Enter to switch: it counts from your next message.')} />}
+    const frame = (key: string, color: string, children: RenderChildren, column = false) => (
+      <Box key={key} borderStyle="round" borderColor={color} paddingX={1} gap={1} flexDirection={column ? 'column' : 'row'} alignItems={column ? undefined : 'center'}>
+        {children}
       </Box>
     )
+    const lead = (color: string, text: string) => (
+      <Box flexShrink={0}>
+        <Text weight="semibold" color={color}>{text}</Text>
+      </Box>
+    )
+    const note = (text: string, italic = false) => (
+      <Box flexShrink={1}>
+        <Text dimColor={!italic} italic={italic} size="footnote" wrap="truncate-end">{text}</Text>
+      </Box>
+    )
+    const offer = heldNow
+      ? frame(
+          'band-held',
+          'blue',
+          <>
+            <Box justifyContent="space-between">
+              <Text weight="semibold" color="blue">Long prompt held{openQ.length ? ` · ${openQ.length} gap${openQ.length > 1 ? 's' : ''}` : ''}</Text>
+              <Text dimColor size="footnote">{check?.running ? 'haiku is reading it…' : check && !check.note ? `clarity ${check.clarity}/10` : ''}</Text>
+            </Box>
+            {openQ.slice(0, 2).map((q, i) => (
+              <Box key={`band-q-${i}`} gap={1} alignItems="center">
+                {note(`? ${q.ask}`)}
+                {q.options.slice(0, 2).map((o, oi) => (
+                  <Button key={`band-q-${i}-${oi}`} plain label={`${oi + 1} ${o}${oi === 0 ? ' ★' : ''}`} onPress={() => void answer($, q.ask, o)} />
+                ))}
+              </Box>
+            ))}
+            <Box gap={1}>
+              {finished !== '' && <Button key="band-send-finished" label="Send the finished prompt" variant="primary" onPress={() => void sendHeld($, finished, true)} />}
+              <Button key="band-send-mine" label="Send as is" onPress={() => void sendHeld($, heldNow.text, false)} />
+            </Box>
+          </>,
+          true,
+        )
+      : firstQ && isWorking
+        ? frame(
+            'band-ask',
+            'blue',
+            <>
+              {lead('blue', '?')}
+              {note(firstQ.ask)}
+              <Box flexGrow={1} />
+              {firstQ.options.slice(0, 3).map((o, oi) => (
+                <Button key={`band-a-${oi}`} label={`${o}${oi === 0 ? ' ★' : ''}`} variant={oi === 0 ? 'primary' : 'secondary'} onPress={() => void answer($, firstQ.ask, o)} />
+              ))}
+            </>,
+          )
+        : left !== null && left > 0 && left <= conf.cacheWarnS * 1000
+          ? frame(
+              'band-cache',
+              'yellow',
+              <>
+                {lead('yellow', `◕ Cache cold in ${mmss(left)}`)}
+                {note(`${k(cached)} tokens re-read at full price on the next prompt`)}
+                <Box flexGrow={1} />
+                <Button key="band-warm2" label="Keep warm" variant="primary" onPress={() => void keepWarm($)} />
+              </>,
+            )
+          : conf.handoff && !isWorking && ctx >= Math.max(conf.handoffAt, snooze + 10)
+            ? frame(
+                'band-handoff',
+                'red',
+                <>
+                  {lead('red', `Context ${ctx}%`)}
+                  {note('start fresh with a handoff prompt: plan, decisions, open files')}
+                  <Box flexGrow={1} />
+                  <Button key="band-handoff-go" label="Write handoff" variant="primary" onPress={() => void writeHandoff($)} />
+                  <Button key="band-handoff-no" plain dimColor label="Not now" onPress={() => void update($, handoffSnooze, () => ctx)} />
+                </>,
+              )
+            : ref?.state === 'open' && ref.rule
+              ? frame(
+                  'band-rule',
+                  'magenta',
+                  <>
+                    {lead('magenta', '✎ Save as a rule?')}
+                    {note(`„${ref.rule}”`, true)}
+                    <Box flexGrow={1} />
+                    <Button key="band-rule-a" label="Everywhere" variant="primary" onPress={() => void saveRule($, 'all')} />
+                    <Button key="band-rule-p" label="This project" onPress={() => void saveRule($, 'project')} />
+                    <Button key="band-rule-x" plain dimColor label="✕" onPress={() => void update($, reflect, r => (r ? { ...r, state: 'skipped' as const } : r))} />
+                  </>,
+                )
+              : null
+
+    const pick = await read($, effortPick)
+    const effortLine =
+      isWorking &&
+      pick &&
+      (pick.isApplied || pick.tip) &&
+      frame(
+        'band-effort',
+        'gray',
+        <>
+          {lead('yellow', `Effort ${pick.level}`)}
+          {note(`for this message: ${pick.why}`)}
+          <Box flexGrow={1} />
+          {pick.isApplied && <Button key="band-lower" label="− Lower" onPress={() => void moveEffort($, -1)} />}
+          {pick.isApplied && <Button key="band-higher" label="+ Higher" onPress={() => void moveEffort($, 1)} />}
+          {pick.tip && <Button key="band-model" label={pick.tip.command} variant="primary" onPress={() => void fillPrompt($, pick.tip!.command, 'Press Enter to switch: it counts from your next message.')} />}
+        </>,
+      )
 
     return (
-      <Box flexDirection="column" width={cols}>
+      <Box flexDirection="column">
         {taskLine}
-        {runStep && <Text dimColor wrap="truncate-end">{'  '}Now: {runStep.title}</Text>}
+        {runStep && (
+          <Box paddingLeft={2}>
+            <Text dimColor size="footnote" wrap="truncate-end">Now: {runStep.title}</Text>
+          </Box>
+        )}
         {offer}
         {effortLine}
       </Box>
