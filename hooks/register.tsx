@@ -8,7 +8,7 @@ import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answ
 import { INDEX, memoriesView } from './memories-tab'
 import { stylesView } from './styles-tab'
 import { hooksView } from './hooks-tab'
-import { checkPrompt, parseCheck, worthChecking } from './check'
+import { checkPrompt, ownText, parseCheck, worthChecking } from './check'
 import { hasHook, hookFromDraft, mainText, offFile, parseSettings, replaceHook, rowsOf, serialize, withHook, withoutHook } from './settings-hooks'
 import type { HookRef, Settings } from './settings-hooks'
 import { activeStyle, buildStyle, parseStyle, slugName, withOutputStyle } from './styles'
@@ -1033,6 +1033,7 @@ export const register: Register = on => {
     // Enter on the text that was held sends it as is; a held prompt already had its check.
     const wasHeld = heldNow !== null && heldNow.text === e.text
     const previous = await read($, prompt)
+    const own = ownText(e.text)
     const isFresh = isHuman && !isReleased && !wasHeld
     if (isFresh) {
       await update($, graphSeen, () => false)
@@ -1046,19 +1047,19 @@ export const register: Register = on => {
       await update($, stageView, () => null)
       await update($, bandHidden, () => false)
       await update($, reflect, () => null)
-      if ((await read($, setup)).reflect && isCorrection(e.text)) void runReflect($, e.text, now)
+      if ((await read($, setup)).reflect && isCorrection(own)) void runReflect($, own, now)
     }
     // Before you send: a long typed prompt stops once, goes back into the box (nothing is lost) and Haiku reads
     // it; Flow offers the finished prompt. If the box cannot take it back, the prompt goes out as usual.
     // A prompt this long (Setup · holdWords) is held for a look before it is sent (once: Enter on the same text sends it).
-    const isLong = e.text.trim().split(/\s+/).length >= (await read($, setup)).holdWords
-    if (isFresh && isTyped && e.command === undefined && isLong && worthChecking(e.text) && (await read($, holdOn)) && (await read($, checkOn))) {
+    const isLong = own.split(/\s+/).length >= (await read($, setup)).holdWords
+    if (isFresh && isTyped && e.command === undefined && isLong && worthChecking(own) && (await read($, holdOn)) && (await read($, checkOn))) {
       const back = await $.prompt.fill({ text: e.text, mode: 'replace' }).catch(() => null)
       if (back?.isFilled) {
         await update($, held, () => ({ text: e.text, at: now }))
-        await update($, prompt, () => e.text)
+        await update($, prompt, () => own)
         await logDid($, '⏸', 'Held your long prompt for a look before sending', 'run')
-        void runCheck($, e.text, previous, now)
+        void runCheck($, own, previous, now)
         void $.ui.open({ id: PANE, title: 'Agent Lens' })
 
         return { drop: 'Agent Lens: held for a look first (Flow). Press Enter to send it as is.' }
@@ -1069,12 +1070,12 @@ export const register: Register = on => {
       await update($, held, () => null)
       // The effort for this message, from its words; it meets its turn at turn.start.
       const mode = await read($, effortMode)
-      const pick = mode === 'off' ? null : pickFor(e.text)
+      const pick = mode === 'off' ? null : pickFor(own)
       await update($, effortPick, () => (pick ? { ...pick, at: now, text: e.text, tip: null, isApplied: false, mode } : null))
     }
     await update($, busy, () => true)
-    await update($, prompt, () => e.text)
-    if (isFresh && (await read($, checkOn)) && worthChecking(e.text)) void runCheck($, e.text, previous, now)
+    await update($, prompt, () => own)
+    if (isFresh && (await read($, checkOn)) && worthChecking(own)) void runCheck($, own, previous, now)
 
     return next(e)
   })
@@ -2292,17 +2293,23 @@ export const register: Register = on => {
               <Text weight="semibold" color={ink('blue')}>Long, loose prompt{openQ.length ? ` · ${openQ.length} gap${openQ.length > 1 ? 's' : ''}` : ''}</Text>
               <Text dimColor size="footnote">{check?.running ? 'haiku is reading it…' : check && !check.note ? `clarity ${check.clarity}/10` : ''}</Text>
             </Box>
+            {/* The question whole on its line, its answers as buttons under it (★ = the default). */}
             {openQ.slice(0, 2).map((q, i) => (
-              <Box key={`band-q-${i}`} gap={1} alignItems="center">
-                {note(`? ${q.ask}`)}
-                {q.options.slice(0, 2).map((o, oi) => (
-                  <Button key={`band-q-${i}-${oi}`} plain label={`${oi + 1} ${o}${oi === 0 ? ' ★' : ''}`} onPress={() => void answer($, q.ask, o)} />
-                ))}
+              <Box key={`band-q-${i}`} flexDirection="column">
+                <Text wrap="wrap">
+                  <Text color={ink('blue')} weight="semibold">? </Text>
+                  {q.ask}
+                </Text>
+                <Box gap={1} flexWrap="wrap">
+                  {q.options.slice(0, 3).map((o, oi) => (
+                    <Button key={`band-q-${i}-${oi}`} variant={oi === 0 ? 'primary' : 'secondary'} label={oi === 0 ? `${o} ★` : o} onPress={() => void answer($, q.ask, o)} />
+                  ))}
+                </Box>
               </Box>
             ))}
             <Box gap={1}>
-              {finished !== '' && <Button key="band-send-finished" label="Send the finished prompt" variant="primary" onPress={() => void sendHeld($, finished, true)} />}
-              <Button key="band-send-mine" label="Send as is" onPress={() => void sendHeld($, heldNow.text, false)} />
+              {finished !== '' && <Button key="band-send-finished" label="Send the finished prompt" variant={openQ.length ? 'secondary' : 'primary'} onPress={() => void sendHeld($, finished, true)} />}
+              <Button key="band-send-mine" plain label="Send mine as is" onPress={() => void sendHeld($, heldNow.text, false)} />
             </Box>
           </>,
           true,

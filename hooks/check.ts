@@ -5,6 +5,10 @@ import { ANSWERS_TAG, questionsOf, strs } from './plan'
 // The prompt check: at submit, Haiku reads the prompt alone (not the code) and says what is missing, with
 // questions answered from Flow and the prompt rewritten. It helps the person phrase the request; the model does not wait.
 
+// What the person typed, without the blocks the app adds around it (`<artifact-view-context …>…</…>`,
+// `<system-reminder>`…): those are not their words, so they count for no length, check or effort.
+export const ownText = (text: string) => text.replace(/<([a-z][\w-]*)\b[^>]*>[\s\S]*?<\/\1>/gi, ' ').trim()
+
 // Too short to judge ("da", "ok"), a slash command, or answers sent from the tab: not checked.
 export const worthChecking = (text: string) => {
   const t = text.trim()

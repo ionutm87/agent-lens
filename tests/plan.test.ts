@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { costOf, tierOf } from '../hooks/cost'
+import { ownText } from '../hooks/check'
 import { ANSWERS_TAG, answersMessage, delegationAsk, delegationText, layers, mirrorTodos, normalizePlan } from '../hooks/plan'
 
 test('steps with no shared dependencies sit on the same level; cycles land last', () => {
@@ -80,4 +81,10 @@ test("the app's task list moves the plan: a whole list, advance, done/start, Tod
   expect(mirrorTodos(p, 'Bash', { command: 'ls' }, 6)).toBe(null)
   const todo = mirrorTodos(null, 'TodoWrite', { todos: [{ content: 'X', status: 'completed', activeForm: 'Xing' }] }, 7)!
   expect(todo.steps.map(s => [s.title, s.status])).toEqual([['X', 'done']])
+})
+
+test("the app's context blocks are not the person's words", () => {
+  const text = '<artifact-view-context artifact="x">\n{"context":{"mode":"canvas"}}\n(long note about the JSON line)\n</artifact-view-context>\n\nperfect dar sa nu uiti'
+  expect(ownText(text)).toBe('perfect dar sa nu uiti')
+  expect(ownText('plain words')).toBe('plain words')
 })
