@@ -35,8 +35,11 @@ step with each step's model, tokens and cost, and the subagent workers. Around i
 - **Setup** — the switches of what used to be separate mods (helper-desk, brain-dump, cache-clock, handoff,
   reflect, effort-picker), the thresholds (handoff at context %, cache lifetime and warning, hold length), the
   other plugins from `settings.json` (on/off, counts after `/reload-plugins`), and the way into Hooks and Styles.
-- **Git** — status, stage/unstage, diff per file, a Haiku-written commit message, commit, sync.
-- **Memories** — the project's auto-memory: a health card (✓ fine / ◐ to look at / ✗ to delete), NEEDS YOU
+- **Git** — status, stage/unstage, diff per file, a Haiku-written commit message, commit, sync, and the history:
+  the last 30 commits by day, each with its time, files and lines added and removed.
+- **Memories** — the project's auto-memory as a map (each memory a node, each `[[link]]` a line; zoom, a type
+  filter, hover for the description, a button per memory opens it), each one editable in place (the frontmatter
+  stays) and explained on request (Sonnet, a few plain sentences). Also a health card (✓ fine / ◐ to look at / ✗ to delete), NEEDS YOU
   with one decision per row (a link to a memory that does not exist, grouped, `unlink` keeps the word; what
   the Sonnet audit flagged, with fix/delete; code that is gone; a memory outside `MEMORY.md`), then one
   section per type. The audit first checks the paths and symbols each memory names against the repo.

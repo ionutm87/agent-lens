@@ -1,6 +1,6 @@
 // The "Git" tab: only the modified files, not the whole tree. The commands (`status --porcelain=v1 -z`,
 // `diff HEAD --numstat -z`) follow the approach from data-goblin/claude-code-filetree (MIT).
-import type { Change } from '../types'
+import type { Change, Commit } from '../types'
 
 export const parseStatus = (out: string): { branch: string; changes: Change[] } => {
   const parts = out.split('\0').filter(Boolean)
@@ -90,3 +90,17 @@ export const clip = (text: string, max: number) => {
 // Haiku sometimes wraps the answer in quotes or a code fence: keep the first useful line.
 export const cleanMessage = (text: string) =>
   (text.split('\n').map(l => l.trim()).find(l => l && !l.startsWith('```')) ?? '').replace(/^["'`]+|["'`]+$/g, '')
+
+// `git log --date=format:'%Y-%m-%d %H:%M' --pretty=format:%x1e%h%x1f%ad%x1f%s --shortstat`: one record per commit.
+export const parseLog = (out: string): Commit[] =>
+  out
+    .split('\x1e')
+    .filter(r => r.trim())
+    .map(r => {
+      const [head = '', ...rest] = r.split('\n')
+      const [hash = '', when = '', subject = ''] = head.split('\x1f')
+      const stat = rest.join(' ')
+      const n = (re: RegExp) => Number(stat.match(re)?.[1] ?? 0)
+
+      return { hash, date: when.slice(0, 10), time: when.slice(11, 16), subject, files: n(/(\d+) files? changed/), add: n(/(\d+) insertions?/), del: n(/(\d+) deletions?/) }
+    })

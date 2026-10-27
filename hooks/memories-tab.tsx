@@ -1,5 +1,5 @@
-import type { Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView } from '../types'
-import { backlinks, isolated } from './memories'
+import type { MemExplain, MemGraph, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView } from '../types'
+import { backlinks, graphSvg, isolated } from './memories'
 import { card, needsYou, section, tiles } from './kit'
 import type { Fold } from './kit'
 
@@ -37,12 +37,14 @@ const k = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 const tail = (path: string) => path.split('/').slice(-2).join('/')
 const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? '' : 's'}`
 
-export type MemoryData = { list: Memory[]; meta: MemoryMeta; use: Record<string, MemoryUse>; opened: MemoryView | null; audit: MemoryAudit; now: number; fold: Fold }
-export type MemoryActions = { open: (name: string) => void; back: () => void; refresh: () => void; analyze: () => void; mermaid: (press: any) => void; fix: (name: string) => void; remove: (names: string[]) => void; unlink: (target: string) => void }
-type Ui = { Box: any; Text: any; Button: any; Markdown: any } // ponytail: terminal elements, untyped here; register.tsx provides them from $.ui.resolve
+// graph/draft/explain: the map's zoom and type filter, the body being edited, what the model said about a memory;
+// width: the map's width in CSS pixels, 0 where the surface draws no Svg (the terminal).
+export type MemoryData = { list: Memory[]; meta: MemoryMeta; use: Record<string, MemoryUse>; opened: MemoryView | null; audit: MemoryAudit; now: number; fold: Fold; graph: MemGraph; draft: string | null; explain: MemExplain | null; width: number }
+export type MemoryActions = { open: (name: string) => void; back: () => void; refresh: () => void; analyze: () => void; mermaid: (press: any) => void; fix: (name: string) => void; remove: (names: string[]) => void; unlink: (target: string) => void; zoom: (by: number) => void; filter: (type: string) => void; edit: () => void; draft: (text: string) => void; save: () => void; cancel: () => void; explain: (name: string) => void }
+type Ui = { Box: any; Text: any; Button: any; Markdown: any; Input?: any; Svg?: any } // ponytail: terminal elements, untyped here; register.tsx provides them from $.ui.resolve
 
-export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold }: MemoryData, act: MemoryActions) => {
-  const { Box, Text, Button, Markdown } = ui
+export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold, graph, draft, explain, width }: MemoryData, act: MemoryActions) => {
+  const { Box, Text, Button, Markdown, Input, Svg } = ui
   const back = backlinks(list)
   const names = new Set(list.map(m => m.name))
   const edges = list.reduce((n, m) => n + m.links.filter(l => names.has(l)).length, 0)
@@ -72,6 +74,36 @@ export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold
   }
   const health = (m: Memory) => (v(m.name)?.verdict === 'irrelevant' ? HEALTH.drop : issues(m).length ? HEALTH.look : v(m.name) ? HEALTH.ok : HEALTH.new)
 
+  // The map: the drawing (desktop), then its controls and one button per memory, which opens it (the drawing
+  // itself takes no presses). The open memory and its neighbours stand out.
+  const typesHere = [...new Set(list.map(m => m.type))]
+  const map = (focus: string | null) => (
+    <Box key="mem-map" flexDirection="column" gap={1}>
+      {width > 0 && Svg && (
+        <Svg key="mem-graph" source={graphSvg(list, { focus, type: graph.type, zoom: graph.zoom, width })} alt={`Map of ${list.length} memories and their links`} width={width} isInteractive />
+      )}
+      <Box gap={1} flexWrap="wrap" alignItems="center">
+        {width > 0 && <Button key="mem-zoom-out" label="−" onPress={() => act.zoom(-0.25)} />}
+        {width > 0 && <Text dimColor tabular size="footnote">{Math.round(graph.zoom * 100)}%</Text>}
+        {width > 0 && <Button key="mem-zoom-in" label="+" onPress={() => act.zoom(0.25)} />}
+        {width > 0 && <Button key="mem-zoom-fit" plain label="fit" onPress={() => act.zoom(0)} />}
+        {['all', ...typesHere].map(t => (
+          <Button key={`mem-type-${t}`} variant={graph.type === t ? 'primary' : 'secondary'} label={`${t === 'all' ? 'All' : `${t[0]!.toUpperCase()}${t.slice(1)}`} ${t === 'all' ? list.length : list.filter(m => m.type === t).length}`} onPress={() => act.filter(t)} />
+        ))}
+      </Box>
+      <Box gap={1} flexWrap="wrap">
+        {list
+          .filter(m => graph.type === 'all' || m.type === graph.type)
+          .map(m => (
+            <Button key={`mem-node-${m.name}`} variant={m.name === focus ? 'primary' : 'secondary'} onPress={open(m.name)}>
+              <Text color={TYPE_COLOR[m.type]}>● </Text>
+              {m.name}
+            </Button>
+          ))}
+      </Box>
+    </Box>
+  )
+
   // An open memory: where it stands and what to do, then what it says, its neighbors and how it was used.
   const node = opened && list.find(m => m.name === opened.name)
   if (opened && node) {
@@ -92,8 +124,11 @@ export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold
       </Box>
     )
 
+    const isMine = explain?.name === node.name
+
     return (
       <Box flexDirection="column" gap={1}>
+        {section(ui, fold, 'mv-map', 'Map', true, () => map(node.name), <Text dimColor size="caption">{out.length} → · {inc.length} ←</Text>)}
         {card(
           ui,
           look.color ?? 'blue',
@@ -141,7 +176,37 @@ export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold
             {inc.map((n, i) => edge(n, i, inc, 'in'))}
           </Box>
         ))}
-        {section(ui, fold, 'mv-body', 'What it says', true, () => <Markdown text={opened.body} />)}
+        {section(ui, fold, 'mv-body', 'What it says', true, () =>
+          draft === null ? (
+            <Box flexDirection="column" gap={1}>
+              <Markdown text={opened.body} />
+              <Box gap={1}>
+                <Button key="mem-edit" label="Edit" hotkey="d" onPress={act.edit} />
+                <Button key="mem-explain" variant="primary" label={isMine && explain!.running ? 'Explaining…' : 'Explain this memory'} hotkey="x" onPress={() => act.explain(node.name)} />
+              </Box>
+            </Box>
+          ) : (
+            <Box flexDirection="column" gap={1}>
+              <Input key="mem-draft" label="" rows={14} value={draft} onInput={(v: string) => act.draft(v)} onSubmit={() => act.save()} submitLabel="save" />
+              <Box gap={1}>
+                <Button key="mem-save" variant="primary" label="Save" onPress={act.save} />
+                <Button key="mem-cancel" label="Cancel" onPress={act.cancel} />
+                <Text dimColor size="footnote">the frontmatter stays as it is</Text>
+              </Box>
+            </Box>
+          ),
+        )}
+        {isMine &&
+          !explain!.running &&
+          (explain!.text || explain!.note) &&
+          card(
+            ui,
+            'blue',
+            <>
+              <Text weight="semibold" color="blue">Claude's explanation</Text>
+              {explain!.text ? <Text wrap="wrap">{explain!.text}</Text> : <Text color="red" wrap="wrap">{explain!.note}</Text>}
+            </>,
+          )}
       </Box>
     )
   }
@@ -235,6 +300,8 @@ export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold
           {audit.note ? <Text wrap="wrap" color={audit.note.startsWith('✗') ? 'red' : 'yellow'}>{audit.note}</Text> : null}
         </>,
       )}
+
+      {section(ui, fold, 'mem-map', 'Map', true, () => map(null), <Text dimColor size="caption">{edges} links · hover a node for its description</Text>)}
 
       {decisions > 0 &&
         needsYou(

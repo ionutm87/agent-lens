@@ -148,3 +148,100 @@ export const toMermaid = (list: readonly Pick<Memory, 'name' | 'type' | 'links'>
 
   return `${lines.join('\n')}\n`
 }
+
+// The map: every memory a node, every [[link]] a line, laid out by a small force pass (same input, same picture).
+// Soft tones per type on a light card of its own, so it reads the same in a light or dark app. `focus` and its
+// neighbours stand out; a `type` filter fades the rest; `zoom` narrows the view around the focus. Hover = <title>.
+const GRAPH_TONE: Record<string, [string, string, string]> = {
+  feedback: ['#DDE6F8', '#9DB3E3', '#2E4A86'],
+  project: ['#DCEFE3', '#93C7A8', '#2D5E45'],
+  user: ['#EDE4F7', '#B9A3DB', '#5B3F86'],
+  reference: ['#FBE7DF', '#E3A898', '#8A3B2B'],
+}
+const OTHER_TONE: [string, string, string] = ['#ECEAE4', '#C9C4B8', '#4A4741']
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+export const layout = (list: readonly Pick<Memory, 'name' | 'links'>[]) => {
+  const names = list.map(m => m.name)
+  const edges = list.flatMap(m => m.links.filter(l => names.includes(l) && l !== m.name).map(l => [m.name, l] as const))
+  // ponytail: O(n²) per pass, fine for a few dozen memories; a grid bucket if a project grows to hundreds
+  const pos: Record<string, [number, number]> = {}
+  names.forEach((n, i) => {
+    const a = (i / Math.max(1, names.length)) * Math.PI * 2
+    pos[n] = [Math.cos(a), Math.sin(a)]
+  })
+  for (let it = 0; it < 300; it++) {
+    const move: Record<string, [number, number]> = Object.fromEntries(names.map(n => [n, [0, 0]]))
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        const [a, b] = [pos[names[i]!]!, pos[names[j]!]!]
+        const dx = a[0] - b[0], dy = a[1] - b[1], d = Math.hypot(dx, dy) + 1e-3, f = 0.05 / (d * d)
+        move[names[i]!]![0] += (dx / d) * f; move[names[i]!]![1] += (dy / d) * f
+        move[names[j]!]![0] -= (dx / d) * f; move[names[j]!]![1] -= (dy / d) * f
+      }
+    }
+    for (const [from, to] of edges) {
+      const [a, b] = [pos[from]!, pos[to]!]
+      const dx = a[0] - b[0], dy = a[1] - b[1], d = Math.hypot(dx, dy) + 1e-3, f = (d - 0.5) * 0.08
+      move[from]![0] -= (dx / d) * f; move[from]![1] -= (dy / d) * f
+      move[to]![0] += (dx / d) * f; move[to]![1] += (dy / d) * f
+    }
+    for (const n of names) {
+      const p = pos[n]!, m = move[n]!
+      p[0] += Math.max(-0.05, Math.min(0.05, m[0] - p[0] * 0.01))
+      p[1] += Math.max(-0.05, Math.min(0.05, m[1] - p[1] * 0.01))
+    }
+  }
+
+  return { pos, edges }
+}
+
+export const graphSvg = (
+  list: readonly Pick<Memory, 'name' | 'type' | 'links' | 'description'>[],
+  { focus, type, zoom, width }: { focus: string | null; type: string; zoom: number; width: number },
+) => {
+  const W = width, H = Math.round(width * 0.68), pad = 70
+  const { pos, edges } = layout(list)
+  const xs = Object.values(pos).map(p => p[0]), ys = Object.values(pos).map(p => p[1])
+  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)]
+  const at = (n: string): [number, number] => [pad + ((pos[n]![0] - x0) / (x1 - x0 || 1)) * (W - 2 * pad), 34 + ((pos[n]![1] - y0) / (y1 - y0 || 1)) * (H - 68)]
+  const near = new Set(focus ? [focus, ...edges.filter(e => e.includes(focus)).flat()] : [])
+  const shown = (m: Pick<Memory, 'type'>) => type === 'all' || m.type === type
+  const [cx, cy] = focus && pos[focus] ? at(focus) : [W / 2, H / 2]
+  const vw = W / zoom, vh = H / zoom
+  const vx = Math.max(0, Math.min(W - vw, cx - vw / 2)), vy = Math.max(0, Math.min(H - vh, cy - vh / 2))
+  const byName = Object.fromEntries(list.map(m => [m.name, m]))
+  const lines = edges
+    .map(([a, b]) => {
+      const [p, q] = [at(a), at(b)]
+      const isNear = a === focus || b === focus
+      const fade = shown(byName[a]!) && shown(byName[b]!) ? 1 : 0.3
+
+      return `<line x1="${p[0].toFixed(1)}" y1="${p[1].toFixed(1)}" x2="${q[0].toFixed(1)}" y2="${q[1].toFixed(1)}" stroke="${isNear ? '#7F96CF' : '#D6CFC2'}" stroke-width="${isNear ? 2.5 : 1.5}" opacity="${fade}"/>`
+    })
+    .join('')
+  const nodes = list
+    .map(m => {
+      const [x, y] = at(m.name)
+      const [bg, bd, fg] = GRAPH_TONE[m.type] ?? OTHER_TONE
+      const label = m.name.length > 26 ? `${m.name.slice(0, 25)}…` : m.name
+      const w = label.length * 6.6 + 24
+      const isFocus = m.name === focus
+      const op = !shown(m) ? 0.28 : focus && !near.has(m.name) ? 0.7 : 1
+
+      return `<g opacity="${op}"><title>${esc(`${m.name} (${m.type})\n${m.description}`)}</title><rect x="${(x - w / 2).toFixed(1)}" y="${(y - 14).toFixed(1)}" width="${w.toFixed(1)}" height="28" rx="14" fill="${bg}" stroke="${isFocus ? '#2B2A27' : bd}" stroke-width="${isFocus ? 2 : 1.2}"/><text x="${x.toFixed(1)}" y="${(y + 4.5).toFixed(1)}" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" font-weight="${isFocus ? 700 : 600}" fill="${fg}">${esc(label)}</text></g>`
+    })
+    .join('')
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="${vx.toFixed(1)} ${vy.toFixed(1)} ${vw.toFixed(1)} ${vh.toFixed(1)}"><rect x="${vx.toFixed(1)}" y="${vy.toFixed(1)}" width="${vw.toFixed(1)}" height="${vh.toFixed(1)}" fill="#FBFAF7"/>${lines}${nodes}</svg>`
+}
+
+// What "explain" asks: the memory and its neighbours, a few plain sentences for the person who owns it.
+export const explainPrompt = (m: { name: string; type: string; description: string }, body: string, linked: { name: string; description: string }[], said: string) =>
+  `Explain one memory of an AI coding agent to the person it belongs to, in 3 or 4 short plain sentences: what it says, why it exists, when the agent applies it, and how it connects to the memories it links to. No headings, no lists, no preamble. Write in the language of this message from the person: "${said.slice(0, 200)}".
+
+Memory "${m.name}" (${m.type}): ${m.description}
+---
+${body.slice(0, 5000)}
+---
+${linked.length ? `Linked memories:\n${linked.map(l => `- ${l.name}: ${l.description}`).join('\n')}` : 'It links to no other memory.'}`

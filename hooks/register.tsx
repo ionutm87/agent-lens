@@ -1,9 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { Engine, HookFor, Register, RenderChildren } from 'claude-code'
 
-import type { Answer, Change, Did, Diff, EditRec, EffortMode, EffortPick, FileTouch, GitNote, Held, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PluginRow, PromptCheck, Reflect, Repo, Setup, Stage, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
+import type { Answer, Change, Commit, Did, Diff, EditRec, EffortMode, EffortPick, FileTouch, GitNote, Held, HookDraft, HookPaths, HookRow, MemExplain, MemGraph, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PluginRow, PromptCheck, Reflect, Repo, Setup, Stage, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
 import { asLevel, pickFor, rank, shift, tipFor } from './effort'
-import { branchLabel, cleanMessage, clip, outcomeOf, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
+import { branchLabel, cleanMessage, clip, outcomeOf, parseLog, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
 import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, delegationAsk, delegationText, layers, mirrorTodos, normalizePlan } from './plan'
 import { INDEX, memoriesView } from './memories-tab'
 import { stylesView } from './styles-tab'
@@ -12,7 +12,7 @@ import { checkPrompt, ownText, parseCheck, worthChecking } from './check'
 import { hasHook, hookFromDraft, mainText, offFile, parseSettings, replaceHook, rowsOf, serialize, withHook, withoutHook } from './settings-hooks'
 import type { HookRef, Settings } from './settings-hooks'
 import { activeStyle, buildStyle, parseStyle, slugName, withOutputStyle } from './styles'
-import { namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, refsOf, toMermaid, withBody, withoutIndexLine, withoutLink } from './memories'
+import { explainPrompt, namesIn, parseIndex, parseMemory, parseVerdicts, projectSlug, refsOf, toMermaid, withBody, withoutIndexLine, withoutLink } from './memories'
 import { card, section as kitSection, tiles } from './kit'
 import { agentsView } from './agents-tab'
 import { chatView } from './chat-tab'
@@ -50,6 +50,10 @@ const memMeta = atom({ plugin: 'agent-lens', key: 'memMeta' } as const, { dir: '
 const memUse = atom({ plugin: 'agent-lens', key: 'memUse' } as const, {} as Record<string, MemoryUse>)
 const memView = atom({ plugin: 'agent-lens', key: 'memView' } as const, null as MemoryView | null)
 const memAudit = atom({ plugin: 'agent-lens', key: 'memAudit' } as const, { at: 0, running: false, note: '', verdicts: {} } as MemoryAudit)
+const memGraph = atom({ plugin: 'agent-lens', key: 'memGraph' } as const, { zoom: 1, type: 'all' } as MemGraph)
+const memDraft = atom({ plugin: 'agent-lens', key: 'memDraft' } as const, null as string | null)
+const memExplain = atom({ plugin: 'agent-lens', key: 'memExplain' } as const, null as MemExplain | null)
+const commits = atom({ plugin: 'agent-lens', key: 'commits' } as const, [] as Commit[])
 const styles = atom({ plugin: 'agent-lens', key: 'styles' } as const, [] as Style[])
 const styleActive = atom({ plugin: 'agent-lens', key: 'styleActive' } as const, '')
 const styleDraft = atom({ plugin: 'agent-lens', key: 'styleDraft' } as const, null as StyleDraft | null)
@@ -171,6 +175,8 @@ const refreshChanges = async ($: Engine) => {
   }
   await update($, repo, () => ({ top: snap?.top ?? '', branch: snap?.branch ?? '', loaded: true }))
   await update($, changes, () => snap?.list ?? [])
+  const log = snap ? await git($, snap.top, ['log', '-30', '--date=format:%Y-%m-%d %H:%M', '--pretty=format:%x1e%h%x1f%ad%x1f%s', '--shortstat']).catch(() => null) : null
+  await update($, commits, () => (log?.exitCode === 0 ? parseLog(log.stdout) : []))
 }
 
 const stage = async ($: Engine, top: string, paths: string[] | 'all') =>
@@ -641,6 +647,55 @@ const openMemory = async ($: Engine, name: string) => {
   if (!m) return
   const text = await $.fs.read(`${dir}/${m.file}`).catch(() => '')
   await update($, memView, () => ({ name, body: clip(parseMemory(m.file, text).body, 6000) }))
+  await update($, memDraft, () => null)
+}
+
+// Edit: the body in a field, written back under the same frontmatter.
+const editMemory = async ($: Engine) => {
+  const { dir } = await read($, memMeta)
+  const v = await read($, memView)
+  const m = v && (await read($, memories)).find(x => x.name === v.name)
+  if (!m) return
+  const text = await $.fs.read(`${dir}/${m.file}`).catch(() => '')
+  await update($, memDraft, () => parseMemory(m.file, text).body)
+}
+
+const saveMemory = async ($: Engine) => {
+  const { dir } = await read($, memMeta)
+  const v = await read($, memView)
+  const body = await read($, memDraft)
+  const m = v && (await read($, memories)).find(x => x.name === v.name)
+  if (!dir || !m || body === null) return
+  try {
+    await $.fs.write(`${dir}/${m.file}`, withBody(await $.fs.read(`${dir}/${m.file}`), body.trim()))
+    await update($, memDraft, () => null)
+    $.ui.toast(`${m.name} saved`)
+  } catch (err) {
+    $.ui.toast(`Not saved: ${(err as Error).message}`)
+  }
+  await loadMemories($)
+  await openMemory($, m.name)
+}
+
+// Explain: Sonnet reads the memory and the ones it links to and says in a few plain sentences what it is for.
+const explainMemory = async ($: Engine, name: string) => {
+  const { dir } = await read($, memMeta)
+  const list = await read($, memories)
+  const m = list.find(x => x.name === name)
+  if (!m || (await read($, memExplain))?.running) return
+  await update($, memExplain, () => ({ name, running: true, text: '', note: '' }))
+  let text = ''
+  let note = ''
+  try {
+    const body = parseMemory(m.file, await $.fs.read(`${dir}/${m.file}`)).body
+    const linked = list.filter(x => m.links.includes(x.name) || x.links.includes(name)).map(x => ({ name: x.name, description: x.description }))
+    const res = await $.model.complete({ model: 'sonnet', effort: 'low', maxTokens: 500, timeoutMs: 60_000, prompt: explainPrompt(m, body, linked, await read($, prompt)) })
+    text = res.isAnswered ? res.text.trim() : ''
+    note = res.isAnswered ? '' : `✗ no explanation (${res.reason})`
+  } catch (err) {
+    note = `✗ no explanation (${(err as Error).message})`
+  }
+  await update($, memExplain, () => ({ name, running: false, text, note }))
 }
 
 // Per tool, with a matcher: the mod already has a matcher-less `tool.call`, and a second one is rejected.
@@ -2003,6 +2058,9 @@ export const register: Register = on => {
     const codeColor = (code: string) => (code === 'M' ? C.run : code === 'A' || code === '?' ? C.ok : code === 'R' ? C.info : C.bad)
     const branch = branchLabel(repoNow.branch)
     // Git: the card says where the branch stands, the list is the changes (press a file for its diff).
+    const history = await read($, commits)
+    // ponytail: the date as git gives it; a weekday name would need Intl, and the module has no locale
+    const dayLabel = (d: string) => d
     const changesView = (
       <Box flexDirection="column" gap={1}>
         {card(
@@ -2050,6 +2108,29 @@ export const register: Register = on => {
               {list.length > Math.max(4, room - 8) && <Text mono size="footnote" dimColor>… {list.length - Math.max(4, room - 8)} more (use stage all)</Text>}
             </Box>
           ), <Text dimColor size="caption">{stagedN}/{list.length} staged · press a name for its diff</Text>)}
+        {history.length > 0 &&
+          section('git-log', 'History', true, () => (
+            <Box flexDirection="column" gap={1}>
+              {[...new Set(history.map(c => c.date))].map(day => (
+                <Box key={`gd-${day}`} flexDirection="column">
+                  <Text weight="semibold">{dayLabel(day)}</Text>
+                  {history
+                    .filter(c => c.date === day)
+                    .map(c => (
+                      <Box key={`gc-${c.hash}`} flexDirection="column" paddingLeft={2}>
+                        <Text wrap="truncate-end">
+                          <Text color={/^feat\b/i.test(c.subject) ? C.ok : /^fix\b/i.test(c.subject) ? C.run : undefined}>● </Text>
+                          {c.subject}
+                        </Text>
+                        <Text mono size="footnote" dimColor wrap="truncate-end">
+                          {'  '}{c.hash} · {c.time} · {c.files} files · <Text color={C.ok}>+{c.add}</Text> <Text color={C.bad}>-{c.del}</Text>
+                        </Text>
+                      </Box>
+                    ))}
+                </Box>
+              ))}
+            </Box>
+          ), <Text dimColor size="caption">last {history.length} on {branch.name || 'this branch'}</Text>)}
       </Box>
     )
 
@@ -2153,7 +2234,7 @@ export const register: Register = on => {
                     create: name => void createStyle($, name),
                     refresh: () => void loadStyles($),
                   },
-                ) : current === 'memories' ? memoriesView($.ui.resolve(e), { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), audit: await read($, memAudit), now: await $.clock.now(), fold }, { analyze: () => void analyzeMemories($), mermaid: (press: { surface?: unknown }) => void copyMermaid($, press?.surface), open: name => void openMemory($, name), back: () => void update($, memView, () => null), refresh: () => void loadMemories($), fix: name => void fixMemory($, name), remove: names => void deleteMemories($, names), unlink: target => void unlinkMemory($, target) }) : current === 'hooks' ? hooksView(
+                ) : current === 'memories' ? memoriesView(ui, { list: await read($, memories), meta: await read($, memMeta), use: await read($, memUse), opened: await read($, memView), audit: await read($, memAudit), now: await $.clock.now(), fold, graph: await read($, memGraph), draft: await read($, memDraft), explain: await read($, memExplain), width: ui.Svg ? Math.max(300, Math.min(760, Math.round(e.props.bodyColumns * 7.5))) : 0 }, { zoom: by => void update($, memGraph, g => ({ ...g, zoom: by === 0 ? 1 : Math.max(1, Math.min(3, g.zoom + by)) })), filter: type => void update($, memGraph, g => ({ ...g, type })), edit: () => void editMemory($), draft: text => void update($, memDraft, () => text), save: () => void saveMemory($), cancel: () => void update($, memDraft, () => null), explain: name => void explainMemory($, name), analyze: () => void analyzeMemories($), mermaid: (press: { surface?: unknown }) => void copyMermaid($, press?.surface), open: name => void openMemory($, name), back: () => void update($, memView, () => null), refresh: () => void loadMemories($), fix: name => void fixMemory($, name), remove: names => void deleteMemories($, names), unlink: target => void unlinkMemory($, target) }) : current === 'hooks' ? hooksView(
                   $.ui.resolve(e),
                   {
                     rows: await read($, hookRows),

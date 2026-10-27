@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
+import { parseLog } from '../hooks/changes'
 
-import { backlinks, isolated, namesIn, parseIndex, parseMemory, projectSlug, parseVerdicts, refsOf, toMermaid, withBody, withoutIndexLine, withoutLink } from '../hooks/memories'
+import { backlinks, graphSvg, isolated, layout, namesIn, parseIndex, parseMemory, projectSlug, parseVerdicts, refsOf, toMermaid, withBody, withoutIndexLine, withoutLink } from '../hooks/memories'
 import '../hooks/register'
 
 test('project slug: same as the engine, only the open project memory', () => {
@@ -151,4 +152,62 @@ test('mermaid: one node per memory, a missing target dashed, the verdict on the 
 
 test('unlink: [[x]] and [[x|alias]] become words, other links stay', () => {
   expect(withoutLink('Vezi [[x]], [[ x |zis]] și [[y]].', 'x')).toBe('Vezi x, zis și [[y]].')
+})
+
+test('Memories map: drawn on the desktop, a node opens its memory, edit saves under the frontmatter, explain asks Sonnet', async ($, on) => {
+  const files: Record<string, string> = {
+    '/m/a.md': '---\nname: a\ndescription: prima\nmetadata:\n  type: feedback\n---\nVezi [[b]].',
+    '/m/b.md': '---\nname: b\ndescription: a doua\nmetadata:\n  type: project\n---\nNimic.',
+  }
+  const asked: string[] = []
+  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.root', () => ({ value: '/p' }))
+  on('clock.now', () => ({ value: 0 }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1, window: 1000000, percent: 0, breakdown: { memoryFiles: [{ path: '/m/MEMORY.md', type: 'AutoMem', tokens: 10 }] } }, rateLimits: [] } }) as never)
+  on('fs.list', ($, e) => ({ value: e.path === '/m' ? Object.keys(files).map(f => ({ name: f.slice(3), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) : [] }))
+  on('fs.read', ($, e) => ({ value: files[e.path] ?? '' }))
+  on('fs.exists', ($, e) => ({ value: e.path in files }))
+  on('fs.write', ($, e) => {
+    files[e.path] = e.text
+    return { value: undefined }
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '' } }) as never)
+  on('model.complete', ($, e) => {
+    asked.push(String((e as { model?: string }).model))
+    return { value: { isAnswered: true, text: 'O regulă despre b.' } } as never
+  })
+
+  const ui = await $.ui.mount({ plugin: 'agent-lens', surface: 'desktop', ...PANE })
+  await ui.press({ key: 'tab-memories' })
+  expect(await ui.find({ type: 'Svg' })).toBeDefined()
+  await ui.press({ key: 'mem-type-project' })
+  expect(await ui.find({ type: 'Button', key: 'mem-node-a' })).toBeUndefined()
+  await ui.press({ key: 'mem-type-all' })
+  await ui.press({ key: 'mem-node-a' })
+  expect(await ui.find({ type: 'Button', key: 'mem-edit' })).toBeDefined()
+  await ui.press({ key: 'mem-edit' })
+  await ui.input({ key: 'mem-draft', text: 'Vezi [[b]] mereu.', kind: 'change' })
+  await ui.press({ key: 'mem-save' })
+  expect(files['/m/a.md']).toBe('---\nname: a\ndescription: prima\nmetadata:\n  type: feedback\n---\n\nVezi [[b]] mereu.\n')
+  await ui.press({ key: 'mem-explain' })
+  expect(asked).toContain('sonnet')
+  expect(await ui.find({ type: 'Text', text: /O regulă despre b/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('map layout is stable, the svg escapes names; git log records parse', () => {
+  const list = [
+    { name: 'a<b', type: 'feedback', links: ['c'], description: 'x & y' },
+    { name: 'c', type: 'project', links: [], description: '' },
+  ]
+  expect(layout(list)).toEqual(layout(list))
+  const svg = graphSvg(list, { focus: 'c', type: 'all', zoom: 2, width: 400 })
+  expect(svg).toContain('a&lt;b')
+  expect(svg).toContain('x &amp; y')
+  expect(svg).toMatch(/viewBox="[\d.]+ [\d.]+ 200\.0 136\.0"/)
+  const log = '\x1eabc1234\x1f2026-10-26 18:26\x1ffeat: one\n\n 3 files changed, 10 insertions(+), 2 deletions(-)\n\x1edef5678\x1f2026-10-25 09:01\x1ffix: two\n\n 1 file changed, 1 deletion(-)'
+  expect(parseLog(log)).toEqual([
+    { hash: 'abc1234', date: '2026-10-26', time: '18:26', subject: 'feat: one', files: 3, add: 10, del: 2 },
+    { hash: 'def5678', date: '2026-10-25', time: '09:01', subject: 'fix: two', files: 1, add: 0, del: 1 },
+  ])
 })

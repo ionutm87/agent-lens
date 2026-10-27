@@ -48,6 +48,15 @@ export type GitNote = { ok: boolean; text: string }
 
 export type Diff = { path: string; text: string }
 
+// One commit of the Git tab's history (`git log --shortstat`).
+export type Commit = { hash: string; date: string; time: string; subject: string; files: number; add: number; del: number }
+
+// The Memories map: how close it looks (1 = all) and which type it shows in full.
+export type MemGraph = { zoom: number; type: string }
+
+// What the model said about one memory ("explain").
+export type MemExplain = { name: string; running: boolean; text: string; note: string }
+
 // cost: USD at each step's real model.
 export type Totals = { steps: number; tokensIn: number; tokensOut: number; cacheRead: number; cost?: number }
 
@@ -189,6 +198,10 @@ declare module 'claude-code' {
       memView: MemoryView | null
       memType: string
       memAudit: MemoryAudit
+      memGraph: MemGraph
+      memDraft: string | null
+      memExplain: MemExplain | null
+      commits: Commit[]
       styles: Style[]
       styleActive: string
       styleDraft: StyleDraft | null
