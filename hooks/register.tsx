@@ -2210,33 +2210,25 @@ export const register: Register = on => {
     const barW = Math.max(120, Math.min(360, Math.round(e.props.bodyColumns * 2.4)))
     const ctxColor = ctx >= conf.handoffAt ? 'red' : ctx >= conf.handoffAt - 20 ? 'yellow' : 'green'
     const cacheColor = left === 0 ? 'red' : left !== null && left <= conf.cacheWarnS * 1000 ? 'yellow' : 'blue'
-    // The Bands board's tones: [border, ground, text] on the desktop; the terminal keeps the color name.
-    const TONE = {
-      blue: ['#bfdbfe', '#ffffff', '#1d4ed8'],
-      yellow: ['#fde68a', '#fffbeb', '#a16207'],
-      orange: ['#fed7aa', '#fff7ed', '#c2410c'],
-      magenta: ['#f5d0fe', '#fdf4ff', '#a21caf'],
-      gray: ['#e7e5e4', '#ffffff', '#c2410c'],
-      green: ['#bbf7d0', '#EEF8F0', '#15803d'],
-      red: ['#fecaca', '#fef2f2', '#b91c1c'],
-    } as const
-    const term = { orange: 'red', gray: 'gray' } as Record<string, string>
-    const ink = (tone: keyof typeof TONE) => (Svg ? TONE[tone][2] : term[tone] ?? tone)
-    // A chip: on the desktop a tinted pill (cache, ctx), on the terminal colored text.
-    const chip = (key: string, tone: keyof typeof TONE, text: string) =>
+    // The Bands board's tones as color names, so they follow the app's light or dark theme: a fixed light ground
+    // hid the dim text and the buttons on a dark desktop.
+    type Tone = 'blue' | 'yellow' | 'orange' | 'magenta' | 'gray' | 'green' | 'red'
+    const ink = (tone: Tone) => ({ orange: 'red', gray: 'red' } as Record<string, string>)[tone] ?? tone
+    // A chip: on the desktop an outlined pill (cache, ctx), on the terminal colored text.
+    const chip = (key: string, tone: Tone, text: string) =>
       Svg ? (
-        <Box key={key} backgroundColor={tone === 'blue' ? '#EFF4FF' : TONE[tone][1]} paddingX={1}>
+        <Box key={key} borderStyle="round" borderColor={ink(tone)} paddingX={1} flexShrink={0}>
           <Text color={ink(tone)} size="footnote" tabular wrap="truncate-end">{text}</Text>
         </Box>
       ) : (
-        <Text key={key} color={tone} size="footnote" tabular wrap="truncate-end">{text}</Text>
+        <Text key={key} color={ink(tone)} size="footnote" tabular wrap="truncate-end">{text}</Text>
       )
 
     // Each piece keeps its own line: the title gives way first, the chips never wrap.
     const taskLine = (
       <Box key="band-task" gap={1} alignItems="center">
         <Text color={Svg ? '#6d28d9' : 'magenta'}>●</Text>
-        <Box flexShrink={1}>
+        <Box flexShrink={1} minWidth={0}>
           <Text weight="semibold" wrap="truncate-end">{title}</Text>
         </Box>
         {total > 0 && (
@@ -2270,18 +2262,21 @@ export const register: Register = on => {
     const finished = check?.better || planNow?.betterPrompt || ''
     const ref = await read($, reflect)
     const snooze = await read($, handoffSnooze)
-    const frame = (key: string, tone: keyof typeof TONE, children: RenderChildren, column = false) => (
-      <Box key={key} borderStyle="round" borderColor={Svg ? TONE[tone][0] : term[tone] ?? tone} backgroundColor={Svg ? TONE[tone][1] : undefined} paddingX={1} gap={1} flexDirection={column ? 'column' : 'row'} alignItems={column ? undefined : 'center'}>
-        {children}
+    // The border Box holds one inner Box with the row: a bordered Box alone is laid out as a column on the desktop.
+    const frame = (key: string, tone: Tone, children: RenderChildren, column = false) => (
+      <Box key={key} flexDirection="column" borderStyle="round" borderColor={ink(tone)} paddingX={1}>
+        <Box gap={1} flexDirection={column ? 'column' : 'row'} alignItems={column ? undefined : 'center'}>
+          {children}
+        </Box>
       </Box>
     )
-    const lead = (tone: keyof typeof TONE, text: string) => (
+    const lead = (tone: Tone, text: string) => (
       <Box flexShrink={0}>
         <Text weight="semibold" color={ink(tone)}>{text}</Text>
       </Box>
     )
     const note = (text: string, italic = false) => (
-      <Box flexShrink={1}>
+      <Box flexShrink={1} minWidth={0}>
         <Text dimColor={!italic} italic={italic} size="footnote" wrap="truncate-end">{text}</Text>
       </Box>
     )
