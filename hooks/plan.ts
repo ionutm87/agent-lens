@@ -130,3 +130,36 @@ export const answersMessage = (answered: readonly { ask: string; text: string }[
 // A step suggestion confirmed from Flow travels as an answer: the question is the step, the answer the delegation.
 export const delegationAsk = (s: PlanStep) => `step ${s.title}`
 export const delegationText = (s: PlanStep) => `delegate to a ${s.tier} subagent${s.why ? ` (${s.why})` : ''}`
+
+// The app's own task list (the desktop's update_plan, TodoWrite) mirrored into the plan, so the band, Flow and the
+// Chat to-do move with it: a whole list replaces the steps (a title seen before keeps its tier and why), `advance`
+// closes the step under way and starts the next, `done` / `start` (1-based) set steps by place.
+const TODO_STATUS: Record<string, PlanStep['status']> = { pending: 'todo', in_progress: 'run', completed: 'done' }
+
+export const mirrorTodos = (old: Plan | null, tool: string, input: unknown, at: number): Plan | null => {
+  const o = (input ?? {}) as Record<string, unknown>
+  const list = tool === 'TodoWrite' ? o.todos : tool === 'mcp__ccd_turn__update_plan' ? o.items : undefined
+  const base: Plan = old ?? { goal: '', approach: '', clarity: 0, assumptions: [], questions: [], betterPrompt: '', steps: [], savings: [], revision: -1, at }
+  let steps = base.steps
+  if (Array.isArray(list)) {
+    steps = (list as Record<string, unknown>[]).map((t, i) => {
+      const title = String(t?.content ?? t?.activeForm ?? '—')
+      const was = base.steps.find(s => s.title === title)
+
+      return { id: String(i + 1), title, tier: was?.tier, why: was?.why ?? '', after: [], status: TODO_STATUS[String(t?.status)] ?? 'todo' }
+    })
+  } else if (tool === 'mcp__ccd_turn__update_plan') {
+    const at1 = (n: unknown) => (typeof n === 'number' ? n - 1 : -1)
+    const done = new Set(Array.isArray(o.done) ? o.done.map(at1) : [])
+    let start = at1(o.start)
+    if (o.advance === true) {
+      const cur = steps.findIndex(s => s.status === 'run')
+      if (cur >= 0) done.add(cur)
+      start = steps.findIndex((s, i) => i > cur && s.status === 'todo')
+    }
+    if (!done.size && start < 0) return null
+    steps = steps.map((s, i) => (done.has(i) ? { ...s, status: 'done' as const } : i === start ? { ...s, status: 'run' as const } : s))
+  } else return null
+
+  return { ...base, steps, revision: base.revision + 1, at }
+}

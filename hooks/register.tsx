@@ -4,7 +4,7 @@ import type { Engine, HookFor, Register, RenderChildren } from 'claude-code'
 import type { Answer, Change, Did, Diff, EditRec, EffortMode, EffortPick, FileTouch, GitNote, Held, HookDraft, HookPaths, HookRow, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PluginRow, PromptCheck, Reflect, Repo, Setup, Stage, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
 import { asLevel, pickFor, rank, shift, tipFor } from './effort'
 import { branchLabel, cleanMessage, clip, outcomeOf, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
-import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, delegationAsk, delegationText, layers, normalizePlan } from './plan'
+import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, delegationAsk, delegationText, layers, mirrorTodos, normalizePlan } from './plan'
 import { INDEX, memoriesView } from './memories-tab'
 import { stylesView } from './styles-tab'
 import { hooksView } from './hooks-tab'
@@ -1152,6 +1152,9 @@ export const register: Register = on => {
     const res = await next(e)
     if (res.deny === undefined && !res.isError) await trackFile($, e as never)
     if (e.agentId || res.deny !== undefined || res.isError) return res
+    const at = await $.clock.now()
+    const mirrored = mirrorTodos(await read($, plan), String(e.tool), e, at)
+    if (mirrored) await update($, plan, () => mirrored)
     const text = await takeAnswers($)
 
     return text ? { ...res, context: [...(res.context ?? []), text] } : res

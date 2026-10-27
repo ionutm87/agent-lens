@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { costOf, tierOf } from '../hooks/cost'
-import { ANSWERS_TAG, answersMessage, delegationAsk, delegationText, layers, normalizePlan } from '../hooks/plan'
+import { ANSWERS_TAG, answersMessage, delegationAsk, delegationText, layers, mirrorTodos, normalizePlan } from '../hooks/plan'
 
 test('steps with no shared dependencies sit on the same level; cycles land last', () => {
   const plan = normalizePlan(
@@ -62,4 +62,22 @@ test('cost per model, with cache and the Haiku 100K threshold', () => {
   expect(r(costOf('haiku', usage(50_000, 0)))).toBe(0.005)
   expect(r(costOf('haiku', usage(150_000, 0)))).toBe(0.075)
   expect(tierOf('claude-sonnet-5-5')).toBe('sonnet')
+})
+
+test("the app's task list moves the plan: a whole list, advance, done/start, TodoWrite", () => {
+  const T = 'mcp__ccd_turn__update_plan'
+  const first = normalizePlan({ goal: 'g', steps: [{ id: 'a', title: 'Read', tier: 'haiku', why: 'reads' }] }, 1)
+  let p = mirrorTodos(first, T, { items: [{ content: 'Read', status: 'in_progress' }, { content: 'Write', status: 'pending' }, { content: 'Test', status: 'pending' }] }, 2)!
+  expect(p.goal).toBe('g')
+  expect(p.steps.map(s => s.status)).toEqual(['run', 'todo', 'todo'])
+  expect(p.steps[0]!.tier).toBe('haiku')
+  p = mirrorTodos(p, T, { advance: true }, 3)!
+  expect(p.steps.map(s => s.status)).toEqual(['done', 'run', 'todo'])
+  p = mirrorTodos(p, T, { done: [2], start: 3 }, 4)!
+  expect(p.steps.map(s => s.status)).toEqual(['done', 'done', 'run'])
+  p = mirrorTodos(p, T, { advance: true }, 5)!
+  expect(p.steps.map(s => s.status)).toEqual(['done', 'done', 'done'])
+  expect(mirrorTodos(p, 'Bash', { command: 'ls' }, 6)).toBe(null)
+  const todo = mirrorTodos(null, 'TodoWrite', { todos: [{ content: 'X', status: 'completed', activeForm: 'Xing' }] }, 7)!
+  expect(todo.steps.map(s => [s.title, s.status])).toEqual([['X', 'done']])
 })
