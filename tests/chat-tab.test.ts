@@ -25,8 +25,8 @@ test('Chat tab: real tool calls fill tools, connectors, files, edits; ◀ ▶, r
     return { result: 'ok' } as never
   })
 
-  // The plan comes first (the mod denies a turn's first tool without one), then the work.
-  await $.tool.call({ tool: 'mcp__agent-lens__plan', goal: 'Restyle the Chat tab', approach: 'x', clarity: 9, steps: [{ id: 'a', title: 'Read the mockup', status: 'done' }, { id: 'b', title: 'Draw the tab', status: 'run' }, { id: 'c', title: 'Test it' }] } as never)
+  // The app's task list, then the work.
+  await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', items: [{ content: 'Read the mockup', status: 'completed' }, { content: 'Draw the tab', status: 'in_progress' }, { content: 'Test it', status: 'pending' }] } as never)
   await $.tool.call({ tool: 'Read', file_path: `${MOD}/register.tsx` } as never)
   await $.tool.call({ tool: 'Read', file_path: `${MOD}/kit.tsx` } as never)
   await $.tool.call({ tool: 'Edit', file_path: `${MOD}/chat-tab.tsx`, old_string: 'old line', new_string: 'new line' } as never)
@@ -43,11 +43,11 @@ test('Chat tab: real tool calls fill tools, connectors, files, edits; ◀ ▶, r
     expect(await ui.find({ type: 'Text', text: /In this chat/ }), `${surface} card`).toBeDefined()
     // Tiles: tools (7 calls; the plan tool answers itself, uncounted), connectors, files, skills.
     expect(await ui.find({ type: 'Text', text: /^connectors$/ }), `${surface} tile`).toBeDefined()
-    // To-do: the Flow plan, 1/3 done.
-    expect(await ui.find({ type: 'Text', text: /1\/3 · same plan as Flow/ }), `${surface} todo`).toBeDefined()
+    // To-do: the app task list, 1/3 done.
+    expect(await ui.find({ type: 'Text', text: /1\/3 · the app.s task list/ }), `${surface} todo`).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Draw the tab/ }), `${surface} todo row`).toBeDefined()
-    // Connectors: codegraph (explore ×2), 2 calls, with its badge.
-    expect(await ui.find({ type: 'Text', text: /^1 · 2 calls$/ }), `${surface} conn aside`).toBeDefined()
+    // Connectors: codegraph (explore ×2) and the app task list, 3 calls.
+    expect(await ui.find({ type: 'Text', text: /^2 · 3 calls$/ }), `${surface} conn aside`).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^Codegraph$/ }), `${surface} conn name`).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /explore ×2/ }), `${surface} conn tools`).toBeDefined()
     if (surface === 'desktop') expect(await ui.find({ type: 'Svg' }), 'badge svg').toBeDefined()

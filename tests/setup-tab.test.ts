@@ -45,7 +45,7 @@ test('Setup tab: switches flip, thresholds cycle, plugins write settings.json, H
 
     // Built in: each switch flips (effort cycles auto → tip → off, so its label changes too).
     const switches = (await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('sw-'))
-    expect(switches.length, `${surface} switches`).toBeGreaterThanOrEqual(8)
+    expect(switches.length, `${surface} switches`).toBeGreaterThanOrEqual(5)
     for (const b of switches) {
       expect(b.props.hotkey, `${b.key} no hotkey`).toBeUndefined()
       const state = async () => {

@@ -4,7 +4,7 @@ import type { Engine, HookFor, Register, RenderChildren } from 'claude-code'
 import type { Answer, Change, Commit, Did, Diff, EditRec, EffortMode, EffortPick, FileTouch, GitNote, Held, HookDraft, HookPaths, HookRow, MemExplain, MemGraph, Memory, MemoryAudit, MemoryMeta, MemoryUse, MemoryView, Plan, PlanStep, PluginRow, PromptCheck, Reflect, Repo, Setup, Stage, Step, StepView, Style, StyleDraft, Tab, Totals, Worker } from '../types'
 import { asLevel, pickFor, rank, shift, tipFor } from './effort'
 import { branchLabel, cleanMessage, clip, outcomeOf, parseLog, parseNumstat, parseStatus, syncSteps, withCounts } from './changes'
-import { PLAN_DESCRIPTION, PLAN_RULE, PLAN_SCHEMA, PLAN_TOOL, PLAN_TOOL_ID, answersMessage, delegationAsk, delegationText, layers, mirrorTodos, normalizePlan } from './plan'
+import { answersMessage, delegationAsk, delegationText, layers, mirrorTodos, normalizePlan } from './plan'
 import { INDEX, memoriesView } from './memories-tab'
 import { stylesView } from './styles-tab'
 import { hooksView } from './hooks-tab'
@@ -30,7 +30,7 @@ const workers = atom({ plugin: 'agent-lens', key: 'workers' } as const, [])
 const skillsUsed = atom({ plugin: 'agent-lens', key: 'skillsUsed' } as const, {})
 const toolCounts = atom({ plugin: 'agent-lens', key: 'toolCounts' } as const, {})
 const prompt = atom({ plugin: 'agent-lens', key: 'prompt' } as const, '')
-const tab = atom({ plugin: 'agent-lens', key: 'tab' } as const, 'think' as Tab)
+const tab = atom({ plugin: 'agent-lens', key: 'tab' } as const, 'chat' as Tab)
 // What is open/closed in Flow, by key; a missing key = the row's default state.
 const folds = atom({ plugin: 'agent-lens', key: 'fold' } as const, {} as Record<string, boolean>)
 const totals = atom({ plugin: 'agent-lens', key: 'totals' } as const, { steps: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0 } as Totals)
@@ -1040,17 +1040,16 @@ export const register: Register = on => {
       const t = await $.clock.now()
       await update($, tick, () => t)
     })())
-    await $.tool.register({ name: PLAN_TOOL, description: PLAN_DESCRIPTION, inputSchema: PLAN_SCHEMA, isDeferred: false })
     void refreshChanges($)
     void loadMemories($)
     void loadStyles($)
     // The prompt check stays on until the person turns it off.
-    const check = await $.store.get('check')
-    await update($, checkOn, () => check !== false)
+    // Flow is off: no prompt check, no hold, no miniplan.
+    await update($, checkOn, () => false)
     const effort = await $.store.get('effort')
     await update($, effortMode, () => (effort === 'tip' || effort === 'off' ? effort : 'auto'))
-    const hold = await $.store.get('hold')
-    await update($, holdOn, () => hold !== false)
+    await update($, holdOn, () => false)
+    await update($, planFirst, () => false)
     await update($, hasGraph, () => false)
     if (await $.fs.exists('.codegraph')) await update($, hasGraph, () => true)
     void $.ui.open({ id: PANE, title: 'Agent Lens' })
@@ -1149,7 +1148,6 @@ export const register: Register = on => {
   on('prompt.compose', async ($, e, next) => {
     const res = await next(e)
     const extra = []
-    if (await read($, planFirst)) extra.push({ id: 'agent-lens:plan', scope: 'session' as const, text: PLAN_RULE })
     if ((await read($, hasGraph)) && (await read($, graphFirst))) {
       extra.push({
         id: 'agent-lens:codegraph',
@@ -1160,7 +1158,7 @@ export const register: Register = on => {
     extra.push({
       id: 'agent-lens:language',
       scope: 'session' as const,
-      text: "Reply to the user in the language of their latest prompt (Romanian prompt → Romanian reply, English prompt → English reply), including the fields you pass to the plan tool. Keep code, identifiers and commands as they are.",
+      text: "Reply to the user in the language of their latest prompt (Romanian prompt → Romanian reply, English prompt → English reply). Keep code, identifiers and commands as they are.",
     })
 
     return extra.length ? { sections: [...res.sections, ...extra] } : res
@@ -1172,26 +1170,10 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The model's plan lands in the Flow tab; a republish keeps its place and bumps the revision.
-  // The literal (not the constant) so the validator sees the matcher; `as never` until the MCP types generated on load include the tool.
-  on('tool.call', { tool: 'mcp__agent-lens__plan' as never }, async ($, e) => {
-    const fresh = normalizePlan(e, await $.clock.now())
-    await update($, plan, old => ({ ...fresh, revision: old ? old.revision + 1 : 0 }))
-
-    return { result: `Plan shown in Agent Lens · Flow (${fresh.steps.length} steps).` }
-  })
-
   on('tool.call', async ($, e, next) => {
     const name = toolLabel(String(e.tool))
     await update($, toolCounts, counts => ({ ...counts, [name]: (counts[name] ?? 0) + 1 }))
     if (name.startsWith('codegraph:')) await update($, graphSeen, () => true)
-    // The miniplan comes before any tool: the first tool of a turn without a published plan is denied once.
-    if (!e.agentId && String(e.tool) !== PLAN_TOOL_ID && (await read($, planFirst)) && !(await read($, plan)) && !(await read($, planAsked))) {
-      await update($, planAsked, () => true)
-      await logDid($, '✓', 'Asked Claude for its plan before the first tool', 'ok')
-
-      return { deny: `Publish the miniplan with ${PLAN_TOOL_ID} first: what you understood (goal) and how you will act (approach), with the steps. Then repeat the tool.` }
-    }
     // The turn's first classic search, without CodeGraph before it, is denied once; the second goes through.
     if (!e.agentId && /^(Grep|Glob)$/.test(String(e.tool)) && (await read($, hasGraph)) && (await read($, graphFirst)) && !(await read($, graphSeen))) {
       await update($, graphSeen, () => true)
@@ -1371,9 +1353,9 @@ export const register: Register = on => {
     const used = await read($, skillsUsed)
     const counts = await read($, toolCounts)
     const lastPrompt = await read($, prompt)
-    // A tab saved by an older version (Steps, Skills) falls back to Flow.
+    // A tab saved by an older version (Flow, Steps, Skills) falls back to Chat.
     const stored = String(await read($, tab))
-    const current: Tab = ['think', 'agents', 'chat', 'changes', 'memories', 'setup', 'styles', 'hooks'].includes(stored) ? (stored as Tab) : 'think'
+    const current: Tab = ['agents', 'chat', 'changes', 'memories', 'setup', 'styles', 'hooks'].includes(stored) ? (stored as Tab) : 'chat'
     const foldNow = await read($, folds)
     const sessionModel = await $.session.model()
     const sum = await read($, totals)
@@ -1417,13 +1399,13 @@ export const register: Register = on => {
           </Text>
           <Box gap={1}>
             <Text color={running ? C.run : C.ok}>{running ? `● ${running} worker${running > 1 ? 's' : ''}` : '○ idle'}</Text>
-            {/* Output styles: a small icon, not a tab; pressed again it goes back to Flow. */}
+            {/* Output styles: a small icon, not a tab; pressed again it goes back to Chat. */}
             <Button
               key="tab-styles"
               plain
               label={current === 'styles' ? '[Aa]' : 'Aa'}
               onPress={() => {
-                void update($, tab, () => (current === 'styles' ? 'think' : 'styles'))
+                void update($, tab, () => (current === 'styles' ? 'chat' : 'styles'))
                 if (current !== 'styles') void loadStyles($)
               }}
             />
@@ -1437,11 +1419,11 @@ export const register: Register = on => {
           { label: 'context', value: `${context.percent ?? '—'}%`, color: pctColor(context.percent ?? 0, 85) },
           { label: five?.resetsAt ? `5h · ${until(Date.parse(five.resetsAt) - now)}` : '5h', value: five ? `${five.percentUsed}%` : '—', color: five ? pctColor(five.percentUsed, 90) : undefined },
         ])}
-        <Box gap={1}>
-          <Button key="planfirst" plain dimColor={!isPlanFirst} label={`${isPlanFirst ? '✓' : '○'} miniplan`} onPress={() => update($, planFirst, v => !v)} />
-          <Button key="check" plain dimColor={!isChecking} label={`${isChecking ? '✓' : '○'} prompt check`} onPress={() => void flipCheck($)} />
-          {graphReady && <Button key="graph" plain dimColor={!isGraphFirst} label={`${isGraphFirst ? '✓' : '○'} graph first`} onPress={() => update($, graphFirst, v => !v)} />}
-        </Box>
+        {graphReady && (
+          <Box gap={1}>
+            <Button key="graph" plain dimColor={!isGraphFirst} label={`${isGraphFirst ? '✓' : '○'} graph first`} onPress={() => update($, graphFirst, v => !v)} />
+          </Box>
+        )}
       </Box>
     )
 
@@ -1449,9 +1431,8 @@ export const register: Register = on => {
       <Box gap={1}>
         {(
           [
-            ['think', 'Flow', 'f'],
-            ['agents', running ? `Agents ●${running}` : 'Agents', 'w'],
             ['chat', 'Chat', 'i'],
+            ['agents', running ? `Agents ●${running}` : 'Agents', 'w'],
             ['changes', `Git ${list.length}`, 'c'],
             ['memories', 'Memories', 'e'],
             ['setup', 'Setup', 'o'],
@@ -2199,10 +2180,7 @@ export const register: Register = on => {
 
     // Setup's switches: Agent Lens's own, each from the mod it used to be.
     const switchesNow: Switch[] = [
-      { key: 'plan', label: 'miniplan before the first tool', on: isPlanFirst, from: 'agent-lens' },
-      { key: 'check', label: 'prompt check', on: isChecking, from: 'brain-dump' },
       ...(graphReady ? [{ key: 'graph', label: 'codegraph first', on: isGraphFirst, from: 'agent-lens' }] : []),
-      { key: 'hold', label: 'hold long prompts', on: isHolding, from: 'brain-dump' },
       { key: 'effort', label: 'effort per message', on: effortModeNow !== 'off', from: 'effort-picker', value: effortModeNow },
       { key: 'band', label: 'task band above the prompt', on: setupNow.band, from: 'helper-desk' },
       { key: 'cache', label: 'cache clock in the band', on: setupNow.cache, from: 'cache-clock' },
@@ -2218,7 +2196,7 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1} minHeight={e.props.scroll.bodyRows}>
         {header}
         {tabs}
-        {current === 'think' ? (stepDetail || thinkView) : current === 'agents' ? agentsView(ui, { workers: allWorkers, steps: allSteps, now, fold, short, k, usd }) : current === 'chat' ? chatView(ui, { counts, skills: used, files: await read($, files), edits: await read($, edits), editIdx: await read($, editIdx), plan: planNow, fold }, { step: by => void stepEdit($, by), replay: () => void replayEdits($) }) : current === 'setup' ? setupView(ui, { switches: switchesNow, setup: setupNow, plugins: await read($, plugins), hooks: hooksSummary, style: (await read($, styleActive)) || '—', fold }, { flip: key => void flipSwitch(key), next: key => void nextThreshold($, key), plugin: id => void flipPlugin($, id), hooks: () => { void update($, tab, () => 'hooks' as Tab); void loadHooks($) }, styles: () => { void update($, tab, () => 'styles' as Tab); void loadStyles($) }, command: name => void fillPrompt($, name, 'Press Enter to run it.') }) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
+        {current === 'agents' ? agentsView(ui, { workers: allWorkers, steps: allSteps, now, fold, short, k, usd }) : current === 'chat' ? chatView(ui, { counts, skills: used, files: await read($, files), edits: await read($, edits), editIdx: await read($, editIdx), plan: planNow, fold }, { step: by => void stepEdit($, by), replay: () => void replayEdits($) }) : current === 'setup' ? setupView(ui, { switches: switchesNow, setup: setupNow, plugins: await read($, plugins), hooks: hooksSummary, style: (await read($, styleActive)) || '—', fold }, { flip: key => void flipSwitch(key), next: key => void nextThreshold($, key), plugin: id => void flipPlugin($, id), hooks: () => { void update($, tab, () => 'hooks' as Tab); void loadHooks($) }, styles: () => { void update($, tab, () => 'styles' as Tab); void loadStyles($) }, command: name => void fillPrompt($, name, 'Press Enter to run it.') }) : current === 'changes' ? (diffView || changesView) : current === 'styles' ? stylesView(
                   $.ui.resolve(e),
                   { list: await read($, styles), active: await read($, styleActive), draft: await read($, styleDraft), fresh: await read($, styleFresh), note: await read($, styleNote), loaded: await read($, styleLoaded), fold },
                   {
@@ -2244,8 +2222,6 @@ export const register: Register = on => {
                     paths: await read($, hookPaths),
                     fold,
                     lens: [
-                      { key: 'check', label: 'prompt check', on: isChecking, what: 'haiku reads each prompt at submit' },
-                      { key: 'plan', label: 'miniplan', on: isPlanFirst, what: 'a plan in Flow before the first tool' },
                       ...(graphReady ? [{ key: 'graph', label: 'codegraph first', on: isGraphFirst, what: 'codegraph_explore before Grep/Glob' }] : []),
                     ],
                   },

@@ -49,12 +49,9 @@ test('the sidebar renders and the tabs switch', async ($, on) => {
     expect(await ui.find({ type: 'Button', key: 'sw-band' })).toBeDefined()
     await ui.press({ key: 'setup-hooks' })
     expect(await ui.find({ type: 'Button', key: 'fold-hk-global' })).toBeDefined()
-    await ui.press({ key: 'tab-think' })
-    // Nothing sent yet: Flow opens on "before"; Execution sits in "working".
-    expect(await ui.find({ type: 'Button', key: 'stage-before' })).toBeDefined()
-    await ui.press({ key: 'stage-during' })
-    expect(await ui.find({ type: 'Button', key: 'fold-exec' })).toBeDefined()
-    await ui.press({ key: 'stage-before' })
+    // Flow is gone: no tab for it, Chat comes first.
+    expect(await ui.find({ type: 'Button', key: 'tab-think' })).toBeUndefined()
+    expect((await ui.findAll({ type: 'Button' })).find(b => b.key?.startsWith('tab-') && b.key !== 'tab-styles')?.key).toBe('tab-chat')
     await ui.unmount()
   }
 })
@@ -86,51 +83,3 @@ test('Git tab: clicking a file opens its diff, "haiku message" fills the field',
   await ui.unmount()
 })
 
-test('Flow tab: the plan published through the tool renders by level', async ($, on) => {
-  on('session.model', () => ({ value: 'claude-opus-5-5' }))
-  on('clock.now', () => ({ value: 0 }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 1, window: 1000000, percent: 0 }, rateLimits: [], cost: { usd: 0 } } }))
-  const res = await $.tool.call({
-    tool: 'mcp__agent-lens__plan',
-    goal: 'New tab that shows how I think',
-    clarity: 6,
-    assumptions: ['in agent-lens, not in Rails'],
-    questions: [{ ask: 'Static or live?', why: 'live needs re-calls', options: ['static', 'live'], default: 'static' }],
-    better_prompt: 'Add a Flow tab to agent-lens…',
-    steps: [
-      { id: 'a', title: 'read the mod', status: 'done' },
-      { id: 'b', title: 'read the API', status: 'run' },
-      { id: 'c', title: 'design', after: ['a', 'b'] },
-      { id: 'd', title: 'find callers', tier: 'haiku', why: 'reads only', after: ['c'] },
-    ],
-    savings: ['reads in parallel'],
-  } as never)
-  expect(String(res.result)).toMatch(/4 steps/)
-  for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ plugin: 'agent-lens', surface, ...PANE })
-    await ui.press({ key: 'tab-think' })
-    expect(await ui.find({ type: 'Text', text: /New tab that shows/ }), "{ type: 'Text', text: /New tab that shows/ }").toBeDefined()
-    // The turn is over (a plan, not busy): Flow shows "done", the plan folded until pressed.
-    expect(await ui.find({ type: 'Text', text: /✓ done/ }), "{ type: 'Text', text: /✓ done/ }").toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'fold-plan' }), "{ type: 'Button', key: 'fold-plan' }").toBeDefined()
-    await ui.press({ key: 'fold-plan' })
-    // a and b share level 1 (1a, 1b run in parallel); the now card names the step under way.
-    expect(await ui.find({ type: 'Text', text: /1b/ }), "{ type: 'Text', text: /1b/ }").toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /read the API/ }), "{ type: 'Text', text: /read the API/ }").toBeDefined()
-    // Steps start closed; a press on the title opens the details, another closes them.
-    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ }), "{ type: 'Text', text: /in parallel with: read the mod/ }").toBeUndefined()
-    await ui.press({ key: 'fold-p-b' })
-    expect(await ui.find({ type: 'Text', text: /in parallel with: read the mod/ }), "{ type: 'Text', text: /in parallel with: read the mod/ }").toBeDefined()
-    await ui.press({ key: 'fold-p-b' })
-    // "Next time" is the last section and open.
-    expect(await ui.find({ type: 'Text', text: /Add a Flow tab to agent-lens/ }), "{ type: 'Text', text: /Add a Flow tab to agent-lens/ }").toBeDefined()
-    // The open question sits in NEEDS YOU with numbered options; the step suggestion waits for a press.
-    expect(await ui.find({ type: 'Text', text: /Static or live/ }), "{ type: 'Text', text: /Static or live/ }").toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'q-0-o-0' }), "{ type: 'Button', key: 'q-0-o-0' }").toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'q-0-d' }), "{ type: 'Button', key: 'q-0-d' }").toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'sgb-d' }), "{ type: 'Button', key: 'sgb-d' }").toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /⤷ haiku \?/ }), "{ type: 'Text', text: /⤷ haiku \\?/ }").toBeDefined()
-    await ui.press({ key: 'fold-plan' })
-    await ui.unmount()
-  }
-})

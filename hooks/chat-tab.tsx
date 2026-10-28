@@ -93,7 +93,7 @@ export const chatView = (ui: Ui, d: Data, act: Acts) => {
               </Text>
             ))}
           </Box>
-        ), aside(`${done}/${steps.length} · same plan as Flow`))}
+        ), aside(`${done}/${steps.length} · the app's task list`))}
       {connectors.length > 0 &&
         section(ui, d.fold, 'chat-conn', 'Connectors', true, () => (
           <Box flexDirection="column" gap={isDesk ? 'xs' : 0}>
