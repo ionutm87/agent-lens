@@ -80,7 +80,7 @@ export const memoriesView = (ui: Ui, { list, meta, use, opened, audit, now, fold
   const map = (focus: string | null) => (
     <Box key="mem-map" flexDirection="column" gap={1}>
       {width > 0 && Svg && (
-        <Svg key="mem-graph" source={graphSvg(list, { focus, type: graph.type, zoom: graph.zoom, width })} alt={`Map of ${list.length} memories and their links`} width={width} isInteractive />
+        <Svg key="mem-graph" source={graphSvg(list, { focus, type: graph.type, zoom: graph.zoom, width })} alt={`Map of ${list.length} memories and their links`} width={width} height={Math.round(width * 0.68)} isInteractive />
       )}
       <Box gap={1} flexWrap="wrap" alignItems="center">
         {width > 0 && <Button key="mem-zoom-out" label="−" onPress={() => act.zoom(-0.25)} />}

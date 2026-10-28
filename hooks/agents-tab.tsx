@@ -37,7 +37,8 @@ const doing = (u: Use) => {
   if (/^(Edit|Write|NotebookEdit)$/.test(u.tool)) return `Editing ${what}`
   if (u.tool.startsWith('mcp__')) return toolName(u.tool)
 
-  return `${u.tool} ${b}`.trim()
+  // A JSON input says nothing in one line: the tool's name alone.
+  return b.startsWith('{') ? u.tool : `${u.tool} ${b}`.trim()
 }
 
 // "haiku-5-5" → "Haiku 5.5"
@@ -56,7 +57,7 @@ const progressSvg = (color: string, state: 'run' | 'done' | 'stop', phase: numbe
         ? `<rect width="${w}" height="${h}" fill="url(#f)"/>${sparks([40, 120, 200, 260, 300, 330])}`
         : `<rect width="${w}" height="${h}" fill="${HEX.red}" opacity=".16"/>`
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"><defs><linearGradient id="p" x1="0" x2="1"><stop offset="0" stop-color="${color}" stop-opacity="0"/><stop offset=".7" stop-color="${color}"/><stop offset="1" stop-color="${color}" stop-opacity=".9"/></linearGradient><linearGradient id="f" x1="0" x2="1"><stop offset="0" stop-color="${color}" stop-opacity=".55"/><stop offset="1" stop-color="${color}"/></linearGradient><clipPath id="c"><rect width="${w}" height="${h}" rx="5"/></clipPath></defs><g clip-path="url(#c)">${body}</g></svg>`
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><defs><linearGradient id="p" x1="0" x2="1"><stop offset="0" stop-color="${color}" stop-opacity="0"/><stop offset=".7" stop-color="${color}"/><stop offset="1" stop-color="${color}" stop-opacity=".9"/></linearGradient><linearGradient id="f" x1="0" x2="1"><stop offset="0" stop-color="${color}" stop-opacity=".55"/><stop offset="1" stop-color="${color}"/></linearGradient><clipPath id="c"><rect width="${w}" height="${h}" rx="5"/></clipPath></defs><g clip-path="url(#c)">${body}</g></svg>`
 }
 
 export const agentsView = (ui: Ui, d: Data) => {
@@ -118,7 +119,8 @@ export const agentsView = (ui: Ui, d: Data) => {
     const color = PET_COLORS[d.workers.indexOf(w) % PET_COLORS.length] ?? HEX.blue!
     const isRunning = w.status === 'running'
     const mine = own(w)
-    const uses = mine.flatMap(s => s.uses ?? [])
+    // The handback is the subagent's own report, not an action: it is not a step.
+    const uses = mine.flatMap(s => s.uses ?? []).filter(u => u.tool !== 'SubagentHandback')
     const spent = mine.reduce((n, s) => n + s.tokensIn + s.tokensOut, 0) || (w.tokensOut ?? 0)
     const effort = [...mine].reverse().find(s => s.effort)?.effort
     const key = `ag-${w.id}`
@@ -159,7 +161,8 @@ export const agentsView = (ui: Ui, d: Data) => {
               <Text key={`${key}-was-${i}`} dimColor mono size="footnote" wrap="truncate-end">{`  ${doing(u)}`}</Text>
             ))}
           </Box>
-          {Svg && <Svg key={`${key}-bar`} source={progressSvg(color, isRunning ? 'run' : w.status === 'done' ? 'done' : 'stop', Math.floor(d.now / 1000))} alt={status} />}
+          {/* Sized here: without width and height the desktop stretched the bar into a tall block. */}
+          {Svg && <Svg key={`${key}-bar`} source={progressSvg(color, isRunning ? 'run' : w.status === 'done' ? 'done' : 'stop', Math.floor(d.now / 1000))} alt={status} width={300} height={8} />}
           {n > 0 && (
             <Box key={`sec-${key}-steps`} flexDirection="column">
               <Button key={`fold-${key}-steps`} plain dimColor label={isOpen ? '▾ Hide steps' : `▸ All ${steps}`} onPress={() => d.fold.toggle(`${key}-steps`, !isOpen)} />
